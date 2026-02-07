@@ -7,7 +7,7 @@
   "publisher": "TRup",
   "author": "Tomasz Rup",
   "originalAuthor": "Lukas Zaruba",
-  "icon": "images/icon.png",
+  "icon": "images/spock.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/TomaszRup/spock-test-runner-vscode"
