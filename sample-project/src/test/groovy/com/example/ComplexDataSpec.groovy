@@ -1,7 +1,7 @@
 package com.example
 
-import spock.lang.Specification
 import spock.lang.Unroll
+import spock.lang.Specification
 
 class ComplexDataSpec extends Specification {
 

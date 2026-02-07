@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { TestIterationResult } from '../types';
+import { DiffInfo, TestIterationResult } from '../types';
 
 export class TestResultParser {
   private logger: vscode.OutputChannel;
@@ -153,11 +153,15 @@ export class TestResultParser {
           const hasError = innerContent.includes('<error');
           const success = !hasFailed && !hasError;
 
-          let errorInfo: { error: string } | undefined;
+          let errorInfo: { error: string; diff?: DiffInfo } | undefined;
           if (hasFailed) {
-            errorInfo = { error: this.extractFullErrorFromXml(innerContent, 'failure') };
+            const errorText = this.extractFullErrorFromXml(innerContent, 'failure');
+            const diff = this.parseExpectedActual(errorText);
+            errorInfo = { error: errorText, diff };
           } else if (hasError) {
-            errorInfo = { error: this.extractFullErrorFromXml(innerContent, 'error') };
+            const errorText = this.extractFullErrorFromXml(innerContent, 'error');
+            const diff = this.parseExpectedActual(errorText);
+            errorInfo = { error: errorText, diff };
           }
 
           const result: TestIterationResult = {
@@ -225,7 +229,7 @@ export class TestResultParser {
    * Parse XML report to get pass/fail results for all tests in a class.
    * Returns a map from test name to result.
    */
-  async parseClassTestResults(workspacePath: string, className: string): Promise<Map<string, {success: boolean; duration: number; errorMessage?: string}>> {
+  async parseClassTestResults(workspacePath: string, className: string): Promise<Map<string, {success: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}>> {
     const testResultsDir = path.join(workspacePath, 'build', 'test-results', 'test');
 
     try {
@@ -249,8 +253,8 @@ export class TestResultParser {
     }
   }
 
-  private parseXmlFileForClassResults(xmlPath: string): Map<string, {success: boolean; duration: number; errorMessage?: string}> {
-    const results = new Map<string, {success: boolean; duration: number; errorMessage?: string}>();
+  private parseXmlFileForClassResults(xmlPath: string): Map<string, {success: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}> {
+    const results = new Map<string, {success: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}>();
     const xmlContent = fs.readFileSync(xmlPath, 'utf8');
     this.logger.appendLine(`TestResultParser: Parsing XML for class results: ${xmlPath}`);
 
@@ -267,13 +271,16 @@ export class TestResultParser {
       const hasError = innerContent.includes('<error');
 
       let errorMessage: string | undefined;
+      let diff: DiffInfo | undefined;
       if (hasFailed) {
         errorMessage = this.extractFullErrorFromXml(innerContent, 'failure');
+        diff = this.parseExpectedActual(errorMessage);
       } else if (hasError) {
         errorMessage = this.extractFullErrorFromXml(innerContent, 'error');
+        diff = this.parseExpectedActual(errorMessage);
       }
 
-      results.set(testName, { success: !hasFailed && !hasError, duration: time, errorMessage });
+      results.set(testName, { success: !hasFailed && !hasError, duration: time, errorMessage, diff });
     }
 
     this.logger.appendLine(`TestResultParser: Found ${results.size} test results in XML`);
@@ -318,6 +325,187 @@ export class TestResultParser {
       .replace(/&gt;/g, '>')
       .replace(/&quot;/g, '"')
       .replace(/&apos;/g, "'");
+  }
+
+  /**
+   * Parse an error message to extract expected/actual values for diff display.
+   * Handles common Spock and Groovy assertion output patterns:
+   *
+   * 1. Spock power assertion with ==:
+   *      Condition not satisfied:
+   *      result == expected
+   *      |      |  |
+   *      6      |  7
+   *             false
+   *
+   * 2. JUnit-style:
+   *      expected: <7> but was: <6>
+   *      expected: 7 but was: 6
+   *
+   * 3. Groovy assert:
+   *      assert x == y
+   *             | |  |
+   *             6 |  7
+   *               false
+   *
+   * 4. Spock comparison failure:
+   *      expected: "foo" but was: "bar"
+   *
+   * 5. ComparisonFailure format:
+   *      Expected :foo
+   *      Actual   :bar
+   */
+  parseExpectedActual(errorMessage: string): DiffInfo | undefined {
+    if (!errorMessage) {
+      return undefined;
+    }
+
+    // Pattern 1: "Expected :X" / "Actual   :Y" (IntelliJ / ComparisonFailure style)
+    const expectedActualBlock = errorMessage.match(/Expected\s*:\s*(.*)\nActual\s*:\s*(.*)/i);
+    if (expectedActualBlock) {
+      return { expected: expectedActualBlock[1].trim(), actual: expectedActualBlock[2].trim() };
+    }
+
+    // Pattern 2: "expected: <X> but was: <Y>" (JUnit angle-bracket style)
+    const junitAngle = errorMessage.match(/expected:\s*<(.+?)>\s*but was:\s*<(.+?)>/i);
+    if (junitAngle) {
+      return { expected: junitAngle[1], actual: junitAngle[2] };
+    }
+
+    // Pattern 3: "expected: X but was: Y" (Spock / Groovy style, possibly quoted)
+    const junitPlain = errorMessage.match(/expected:\s*(.+?)\s+but was:\s*(.+?)(?:\s*$|\n)/im);
+    if (junitPlain) {
+      return { expected: junitPlain[1].trim(), actual: junitPlain[2].trim() };
+    }
+
+    // Pattern 4: Spock power assertion block
+    // Look for "Condition not satisfied:" followed by an expression containing ==
+    const conditionBlock = errorMessage.match(
+      /Condition not satisfied:\s*\n\s*(.+?==.+?)\n([\s\S]*?)(?:\n\s*$|\nat\s)/
+    );
+    if (conditionBlock) {
+      return this.parseSpockPowerAssertion(conditionBlock[1], conditionBlock[2]);
+    }
+
+    // Pattern 4b: Same but without "Condition not satisfied:" preamble
+    // Sometimes the message starts directly with the expression
+    const directAssertion = errorMessage.match(
+      /^[ \t]*(.+?==.+?)\n((?:[ \t]*[|^\s].*\n?)+)/m
+    );
+    if (directAssertion) {
+      return this.parseSpockPowerAssertion(directAssertion[1], directAssertion[2]);
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Parse a Spock power assertion block to extract expected and actual values.
+   * The expression line contains "lhs == rhs" and the value lines show resolved values
+   * underneath each sub-expression, aligned by column position.
+   *
+   * Example:
+   *   game.score() == expectedScore    ← expressionLine
+   *   |    |       |  |                ← pointer lines
+   *   |    6       |  7                ← value lines
+   *   |            false
+   *   Game@abc
+   */
+  private parseSpockPowerAssertion(expressionLine: string, valueBlock: string): DiffInfo | undefined {
+    const eqIndex = expressionLine.indexOf('==');
+    if (eqIndex === -1) {
+      return undefined;
+    }
+
+    // The LHS expression ends just before == and RHS starts just after ==
+    const lhsExpr = expressionLine.substring(0, eqIndex).trimEnd();
+    const rhsExpr = expressionLine.substring(eqIndex + 2).trimStart();
+
+    // The value block has lines like:
+    //   |    6       |  7
+    //   |            false
+    // Values are positioned at the same column as their sub-expression in the expression line.
+    // We need to find the resolved value nearest to the LHS end and RHS start.
+
+    const valueLines = valueBlock.split('\n');
+
+    // Collect all (column, value) pairs from the value lines
+    const values: Array<{ col: number; value: string }> = [];
+    for (const vLine of valueLines) {
+      // Find non-pipe, non-whitespace tokens and their column positions
+      let i = 0;
+      while (i < vLine.length) {
+        if (vLine[i] === '|' || vLine[i] === ' ') {
+          i++;
+          continue;
+        }
+        // Found start of a value token
+        const start = i;
+        while (i < vLine.length && vLine[i] !== '|' && !(vLine[i] === ' ' && i > start)) {
+          // Allow spaces inside values like "false" or complex strings, but stop at pipe
+          if (vLine[i] === ' ') {
+            // Peek ahead: if next non-space is a pipe or end, this space is trailing
+            let j = i;
+            while (j < vLine.length && vLine[j] === ' ') { j++; }
+            if (j >= vLine.length || vLine[j] === '|') { break; }
+            // Otherwise the space is part of a multi-word value — but for Spock
+            // values are typically single tokens, so break conservatively
+            break;
+          }
+          i++;
+        }
+        const token = vLine.substring(start, i).trim();
+        if (token && token !== 'false' && token !== 'true') {
+          // Skip 'false' from the == comparison result itself
+          values.push({ col: start, value: token });
+        } else if (token === 'true' || token === 'false') {
+          // 'false' at the == position is the comparison result, not a value
+          // But 'true'/'false' elsewhere is a real value
+          const eqCol = eqIndex;
+          if (Math.abs(start - eqCol) > 2) {
+            // Not near the == operator, treat as real value
+            values.push({ col: start, value: token });
+          }
+        }
+        i++;
+      }
+    }
+
+    if (values.length === 0) {
+      return undefined;
+    }
+
+    // Find the value closest to the LHS expression (column < eqIndex)
+    // and the value closest to the RHS expression (column > eqIndex)
+    let lhsValue: string | undefined;
+    let rhsValue: string | undefined;
+    let lhsBestDist = Infinity;
+    let rhsBestDist = Infinity;
+
+    for (const v of values) {
+      if (v.col < eqIndex) {
+        // Candidate for LHS — prefer the one closest to (but before) ==
+        const dist = eqIndex - v.col;
+        if (dist < lhsBestDist) {
+          lhsBestDist = dist;
+          lhsValue = v.value;
+        }
+      } else if (v.col > eqIndex) {
+        // Candidate for RHS — prefer the one closest to (but after) ==
+        const dist = v.col - eqIndex;
+        if (dist < rhsBestDist) {
+          rhsBestDist = dist;
+          rhsValue = v.value;
+        }
+      }
+    }
+
+    if (lhsValue !== undefined && rhsValue !== undefined) {
+      // In Spock, `lhs == rhs` means rhs is the "expected" and lhs is the "actual"
+      return { expected: rhsValue, actual: lhsValue };
+    }
+
+    return undefined;
   }
 
   /**

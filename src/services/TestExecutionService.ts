@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { TestExecutionOptions, TestResult } from '../types';
 import { BuildToolService } from './BuildToolService';
+import { ConfigurationService } from './ConfigurationService';
 import { DebugService } from './DebugService';
 
 export class TestExecutionService {
@@ -14,10 +15,13 @@ export class TestExecutionService {
     this.debugService = new DebugService(logger);
   }
 
-  async executeTest(options: TestExecutionOptions, run: vscode.TestRun, testItem?: vscode.TestItem): Promise<TestResult> {
+  async executeTest(options: TestExecutionOptions, run: vscode.TestRun, testItem?: vscode.TestItem, token?: vscode.CancellationToken): Promise<TestResult> {
     return new Promise(async (resolve) => {
       let timeoutId: NodeJS.Timeout | undefined;
       let processKilled = false;
+      let cancellationListener: vscode.Disposable | undefined;
+      const cfg = ConfigurationService.getConfig();
+      const timeoutMs = cfg.testTimeout * 1000;
       
       const fullTestName = `${options.className}.${options.testName}`;
       
@@ -31,12 +35,12 @@ export class TestExecutionService {
       // Start debug session if debugging
       if (options.debug) {
         // Don't await — let it connect in the background while Gradle starts.
-        // DebugService.waitForJvmDebugPort polls until port 5005 is open.
+        // DebugService.waitForJvmDebugPort polls until the configured port is open.
         this.debugService.startDebugSession({
           workspacePath: options.workspacePath,
           className: options.className,
           testName: options.testName,
-          debugPort: 5005
+          debugPort: cfg.debugPort
         }).catch(error => {
           this.logger.appendLine(`TestExecutionService: Failed to start debug session: ${error}`);
         });
@@ -53,10 +57,32 @@ export class TestExecutionService {
         shell: process.platform === 'win32'
       });
 
+      // Wire cancellation token to kill the child process
+      if (token) {
+        if (token.isCancellationRequested) {
+          processKilled = true;
+          childProcess.kill('SIGTERM');
+          resolve({ success: false, errorInfo: { error: 'Test run was cancelled' }, output: 'Test run was cancelled' });
+          return;
+        }
+        cancellationListener = token.onCancellationRequested(() => {
+          if (!childProcess.killed && !processKilled) {
+            this.logger.appendLine('TestExecutionService: Cancellation requested - killing process');
+            processKilled = true;
+            childProcess.kill('SIGTERM');
+            setTimeout(() => {
+              if (!childProcess.killed) {
+                childProcess.kill('SIGKILL');
+              }
+            }, 5000);
+          }
+        });
+      }
+
       // Set up timeout
       timeoutId = setTimeout(() => {
         if (!childProcess.killed && !processKilled) {
-          this.logger.appendLine(`TestExecutionService: Test timeout - killing process after 5 minutes`);
+          this.logger.appendLine(`TestExecutionService: Test timeout - killing process after ${cfg.testTimeout} seconds`);
           processKilled = true;
           childProcess.kill('SIGTERM');
           
@@ -69,11 +95,11 @@ export class TestExecutionService {
           
           resolve({ 
             success: false, 
-            errorInfo: { error: 'Test execution timed out after 5 minutes' },
-            output: 'Test execution timed out after 5 minutes'
+            errorInfo: { error: `Test execution timed out after ${cfg.testTimeout} seconds` },
+            output: `Test execution timed out after ${cfg.testTimeout} seconds`
           });
         }
-      }, 5 * 60 * 1000);
+      }, timeoutMs);
 
       let output = '';
       let errorOutput = '';
@@ -106,6 +132,13 @@ export class TestExecutionService {
         if (timeoutId) {
           clearTimeout(timeoutId);
         }
+        cancellationListener?.dispose();
+        
+        if (processKilled && token?.isCancellationRequested) {
+          this.logger.appendLine('TestExecutionService: Process closed after cancellation');
+          resolve({ success: false, errorInfo: { error: 'Test run was cancelled' }, output: output + errorOutput });
+          return;
+        }
         
         this.logger.appendLine(`TestExecutionService: Process closed with code: ${code}`);
         const success = code === 0;
@@ -125,6 +158,7 @@ export class TestExecutionService {
         if (timeoutId) {
           clearTimeout(timeoutId);
         }
+        cancellationListener?.dispose();
         
         this.logger.appendLine(`TestExecutionService: Process error: ${error.message}`);
         const errorMessage = `Process error: ${error.message}`;
@@ -159,22 +193,25 @@ export class TestExecutionService {
     testItems: vscode.TestItem[];
     debug: boolean;
     onOutputLine?: (line: string) => void;
+    token?: vscode.CancellationToken;
   }): Promise<{success: boolean; output: string}> {
     return new Promise(async (resolve) => {
       let timeoutId: NodeJS.Timeout | undefined;
       let processKilled = false;
+      let cancellationListener: vscode.Disposable | undefined;
 
       this.logger.appendLine(`TestExecutionService: Executing batch: ${options.commandArgs.join(' ')}`);
       this.logger.appendLine(`TestExecutionService: Working directory: ${options.workspacePath}`);
 
       if (options.debug) {
+        const batchCfg = ConfigurationService.getConfig();
         // Don't await — let it connect in the background while Gradle starts.
-        // DebugService.waitForJvmDebugPort polls until port 5005 is open.
+        // DebugService.waitForJvmDebugPort polls until the configured port is open.
         this.debugService.startDebugSession({
           workspacePath: options.workspacePath,
           className: '',
           testName: '',
-          debugPort: 5005
+          debugPort: batchCfg.debugPort
         }).catch(error => {
           this.logger.appendLine(`TestExecutionService: Failed to start debug session: ${error}`);
         });
@@ -187,9 +224,33 @@ export class TestExecutionService {
         shell: process.platform === 'win32'
       });
 
+      // Wire cancellation token to kill the child process
+      if (options.token) {
+        if (options.token.isCancellationRequested) {
+          processKilled = true;
+          childProcess.kill('SIGTERM');
+          resolve({ success: false, output: 'Test run was cancelled' });
+          return;
+        }
+        cancellationListener = options.token.onCancellationRequested(() => {
+          if (!childProcess.killed && !processKilled) {
+            this.logger.appendLine('TestExecutionService: Cancellation requested - killing batch process');
+            processKilled = true;
+            childProcess.kill('SIGTERM');
+            setTimeout(() => {
+              if (!childProcess.killed) {
+                childProcess.kill('SIGKILL');
+              }
+            }, 5000);
+          }
+        });
+      }
+
+      const batchTimeoutCfg = ConfigurationService.getConfig();
+      const batchTimeoutMs = batchTimeoutCfg.testTimeout * 1000;
       timeoutId = setTimeout(() => {
         if (!childProcess.killed && !processKilled) {
-          this.logger.appendLine(`TestExecutionService: Batch timeout - killing process after 5 minutes`);
+          this.logger.appendLine(`TestExecutionService: Batch timeout - killing process after ${batchTimeoutCfg.testTimeout} seconds`);
           processKilled = true;
           childProcess.kill('SIGTERM');
           setTimeout(() => {
@@ -197,9 +258,9 @@ export class TestExecutionService {
               childProcess.kill('SIGKILL');
             }
           }, 10000);
-          resolve({ success: false, output: 'Test execution timed out after 5 minutes' });
+          resolve({ success: false, output: `Test execution timed out after ${batchTimeoutCfg.testTimeout} seconds` });
         }
-      }, 5 * 60 * 1000);
+      }, batchTimeoutMs);
 
       let output = '';
       let lineBuffer = '';
@@ -229,8 +290,14 @@ export class TestExecutionService {
 
       childProcess.on('close', (code: number | null) => {
         if (timeoutId) { clearTimeout(timeoutId); }
+        cancellationListener?.dispose();
         if (options.onOutputLine && lineBuffer.trim()) {
           options.onOutputLine(lineBuffer);
+        }
+        if (processKilled && options.token?.isCancellationRequested) {
+          this.logger.appendLine('TestExecutionService: Batch process closed after cancellation');
+          resolve({ success: false, output });
+          return;
         }
         this.logger.appendLine(`TestExecutionService: Batch process closed with code: ${code}`);
         resolve({ success: code === 0, output });
@@ -238,6 +305,7 @@ export class TestExecutionService {
 
       childProcess.on('error', (error: Error) => {
         if (timeoutId) { clearTimeout(timeoutId); }
+        cancellationListener?.dispose();
         this.logger.appendLine(`TestExecutionService: Batch process error: ${error.message}`);
         options.run.appendOutput(`Process error: ${error.message}`);
         resolve({ success: false, output: `Process error: ${error.message}` });

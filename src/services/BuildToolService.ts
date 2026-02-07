@@ -2,6 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import { BuildTool } from '../types';
+import { ConfigurationService } from './ConfigurationService';
 
 export class BuildToolService {
   /**
@@ -69,6 +70,66 @@ export class BuildToolService {
            fs.existsSync(path.join(dir, 'build.gradle.kts'));
   }
 
+  /**
+   * Find the Gradle root project by walking up from a (sub)project directory.
+   * The root project is identified by the presence of settings.gradle or
+   * settings.gradle.kts.  If no settings file is found within the workspace
+   * boundary, the original project path is returned (standalone project).
+   *
+   * @param projectPath  - The subproject (or root) directory
+   * @param workspaceRoot - VS Code workspace root (search boundary)
+   * @returns The Gradle root project directory
+   */
+  static findGradleRootProject(projectPath: string, workspaceRoot: string): string {
+    let currentDir = projectPath;
+    const normalizedRoot = path.resolve(workspaceRoot);
+
+    while (true) {
+      const normalizedCurrent = path.resolve(currentDir);
+
+      if (fs.existsSync(path.join(currentDir, 'settings.gradle')) ||
+          fs.existsSync(path.join(currentDir, 'settings.gradle.kts'))) {
+        return currentDir;
+      }
+
+      // Stop after checking the workspace root
+      if (normalizedCurrent === normalizedRoot) {
+        break;
+      }
+
+      const parentDir = path.dirname(currentDir);
+      if (parentDir === currentDir) {
+        break; // Filesystem root
+      }
+      currentDir = parentDir;
+    }
+
+    // No settings file found; treat the original path as the root
+    return projectPath;
+  }
+
+  /**
+   * Compute the Gradle subproject task prefix for a subproject directory
+   * relative to the root project.  Returns an empty string when the
+   * subproject IS the root project.
+   *
+   * Example: root="/ws", sub="/ws/moduleA"       → ":moduleA"
+   * Example: root="/ws", sub="/ws/parent/child"   → ":parent:child"
+   */
+  static getSubprojectPrefix(rootProject: string, subprojectPath: string): string {
+    const normalizedRoot = path.resolve(rootProject);
+    const normalizedSub  = path.resolve(subprojectPath);
+
+    if (normalizedRoot === normalizedSub) {
+      return ''; // Root project itself, no prefix needed
+    }
+
+    const relativePath = path.relative(normalizedRoot, normalizedSub);
+    // Convert OS path separators to Gradle colon notation
+    const gradlePath = relativePath.split(path.sep).join(':');
+    return `:${gradlePath}`;
+  }
+
   static getProjectName(workspacePath: string): string {
     try {
       const gradlePath = path.join(workspacePath, 'build.gradle');
@@ -95,7 +156,8 @@ export class BuildToolService {
     testName: string, 
     debug: boolean, 
     workspacePath?: string,
-    logger?: vscode.OutputChannel
+    logger?: vscode.OutputChannel,
+    subprojectPrefix?: string
   ): string[] {
     const isWindows = process.platform === 'win32';
     // On Windows with shell: true, arguments with spaces must be quoted
@@ -109,7 +171,8 @@ export class BuildToolService {
     } else {
       gradleCommand = 'gradle';
     }
-    const baseArgs = [gradleCommand, 'test', '--tests', escapedTestName, '--stacktrace'];
+    const taskName = subprojectPrefix ? `${subprojectPrefix}:test` : 'test';
+    const baseArgs = [gradleCommand, taskName, '--tests', escapedTestName, '--stacktrace'];
     
     // Use init script to force test execution
     const initScriptPath = quote(this.getInitScriptPath());
@@ -120,10 +183,12 @@ export class BuildToolService {
       logger.appendLine(`BuildToolService: Using Gradle init script to force test execution (--init-script)`);
     }
     
+    const extraArgs = ConfigurationService.getConfig().additionalGradleArgs;
+
     if (debug) {
-      return [...baseArgs, '--debug-jvm', ...initScriptArgs];
+      return [...baseArgs, '--debug-jvm', ...initScriptArgs, ...extraArgs];
     } else {
-      return [...baseArgs, ...initScriptArgs];
+      return [...baseArgs, ...initScriptArgs, ...extraArgs];
     }
   }
 
@@ -131,7 +196,9 @@ export class BuildToolService {
     testFilters: string[],
     debug: boolean,
     workspacePath?: string,
-    logger?: vscode.OutputChannel
+    logger?: vscode.OutputChannel,
+    subprojectPrefix?: string,
+    coverage: boolean = false
   ): string[] {
     const isWindows = process.platform === 'win32';
     const quote = (s: string) => isWindows && s.includes(' ') ? `"${s}"` : s;
@@ -143,23 +210,29 @@ export class BuildToolService {
       gradleCommand = 'gradle';
     }
 
-    const args = [gradleCommand, 'test'];
+    const taskName = subprojectPrefix ? `${subprojectPrefix}:test` : 'test';
+    const args = [gradleCommand, taskName];
     for (const filter of testFilters) {
       args.push('--tests', quote(filter));
     }
 
     args.push('--stacktrace');
 
-    const initScriptPath = quote(this.getInitScriptPath());
+    const initScriptPath = coverage
+      ? quote(this.getCoverageInitScriptPath())
+      : quote(this.getInitScriptPath());
     args.push('--init-script', initScriptPath);
 
     if (logger) {
-      logger.appendLine(`BuildToolService: Batch execution with ${testFilters.length} test filter(s)`);
+      logger.appendLine(`BuildToolService: Batch execution with ${testFilters.length} test filter(s)${coverage ? ' (with coverage)' : ''}`);
     }
 
     if (debug) {
       args.push('--debug-jvm');
     }
+
+    const extraArgs = ConfigurationService.getConfig().additionalGradleArgs;
+    args.push(...extraArgs);
 
     return args;
   }
@@ -173,6 +246,17 @@ export class BuildToolService {
       throw new Error(`Init script not found at: ${initScriptPath}`);
     }           
     
+    return initScriptPath;
+  }
+
+  /**
+   * Path to the coverage init script that applies JaCoCo and forces tests.
+   */
+  static getCoverageInitScriptPath(): string {
+    const initScriptPath = path.join(__dirname, '..', '..', 'resources', 'coverage.init.gradle');
+    if (!fs.existsSync(initScriptPath)) {
+      throw new Error(`Coverage init script not found at: ${initScriptPath}`);
+    }
     return initScriptPath;
   }
 

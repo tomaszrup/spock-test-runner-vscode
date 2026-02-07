@@ -16,7 +16,10 @@
   },
   "exclude": [
     "node_modules",
-    ".vscode-test"
+    ".vscode-test",
+    "src/**/*.test.ts",
+    "src/__mocks__/**",
+    "vitest.config.ts"
   ],
   "include": [
     "src/**/*"

@@ -1,9 +1,10 @@
 package com.example
 
+
 import spock.lang.Specification
 import spock.lang.Unroll
 
-class BowlingGameSpec extends Specification {
+class BowlingGameSpec extends Specification implements TestTrait {
 
     // 1. Basic data table with pipe separators
     def "should calculate score for regular frames"(int roll1, int roll2, int expectedScore) {
@@ -26,7 +27,8 @@ class BowlingGameSpec extends Specification {
     }
 
     // 2. Data table with double pipe separator (input vs output)
-    def "should handle strikes correctly"(int pins, int expectedScore) {
+    def "should handle strikes correctly"(int pins,
+    int expectedScore) {
         given:
         BowlingGame game = new BowlingGame()
 
@@ -138,14 +140,14 @@ class BowlingGameSpec extends Specification {
 
         where:
         gameState << [
-            "perfect game",
-            "gutter game", 
-            "spare game"
+        "perfect game",
+        "gutter game",
+        "spare game"
         ]
         rolls << [
-            [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]
+        [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]
         ]
         expectedScore << [300, 0, 150]
     }
@@ -191,10 +193,10 @@ class BowlingGameSpec extends Specification {
 
         where:
         [frameType, roll1, roll2, isComplete] << [
-            ["strike", 10, -1, true],
-            ["spare", 5, 5, true],
-            ["regular", 3, 4, true],
-            ["incomplete", 5, -1, false]
+        ["strike", 10, -1, true],
+        ["spare", 5, 5, true],
+        ["regular", 3, 4, true],
+        ["incomplete", 5, -1, false]
         ]
     }
 
@@ -229,10 +231,10 @@ class BowlingGameSpec extends Specification {
         where:
         scenario << ["perfect", "gutter", "mixed", "spares"]
         rolls << [
-            [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [3, 4, 10, 5, 5, 2, 3, 0, 0, 0, 0, 0],
-            [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]
+        [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [3, 4, 10, 5, 5, 2, 3, 0, 0, 0, 0, 0],
+        [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]
         ]
         expectedScore << [300, 0, 42, 150]
     }
@@ -248,7 +250,7 @@ class BowlingGameSpec extends Specification {
             game.roll(3)
             game.roll(4)
         }
-        
+
         // Last frame
         game.roll(roll1)
         if (roll2 >= 0) game.roll(roll2)
@@ -295,7 +297,7 @@ class BowlingGameSpec extends Specification {
             game.roll(3)
             game.roll(4)
         }
-        
+
         for (int i = 0; i < currentRoll - 1; i++) {
             game.roll(3)
         }
@@ -330,6 +332,7 @@ class BowlingGameSpec extends Specification {
         when:
         BowlingGame game = new BowlingGame()
         game.roll(pins)
+        someMethod(pins)
 
         then:
         IllegalArgumentException e = thrown()
@@ -340,4 +343,9 @@ class BowlingGameSpec extends Specification {
         -1   | "Pins must be between 0 and 10"
         11   | "Pins must be between 0 and 10"
     }
+
+    def someMethod(param) {
+        // This method is just a placeholder to demonstrate method parameters in Spock tests
+    }
+
 }

@@ -1,0 +1,31 @@
+// Injected by Spock Test Runner extension to enable JaCoCo code coverage.
+// Applied via --init-script so the user's build.gradle is not modified.
+allprojects {
+  apply plugin: 'jacoco'
+
+  tasks.matching { it.name == "test" || it instanceof Test }.configureEach {
+    // Force test tasks to run (same as force-tests.init.gradle)
+    outputs.upToDateWhen { false }
+
+    // Enable real-time test result output for the extension to parse
+    testLogging {
+      events "passed", "failed", "skipped"
+    }
+
+    // Attach JaCoCo agent
+    jacoco {
+      // Use defaults; the agent jar is resolved automatically by the plugin.
+    }
+
+    // Generate XML report after tests complete so the extension can parse it.
+    finalizedBy jacocoTestReport
+  }
+
+  tasks.matching { it.name == "jacocoTestReport" }.configureEach {
+    reports {
+      xml.required = true
+      html.required = true
+      csv.required = false
+    }
+  }
+}

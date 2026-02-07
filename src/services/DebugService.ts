@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as net from 'net';
 import { DebugSessionOptions } from '../types';
 import { BuildToolService } from './BuildToolService';
+import { ConfigurationService } from './ConfigurationService';
 
 export class DebugService {
   private logger: vscode.OutputChannel;
@@ -13,18 +14,21 @@ export class DebugService {
   }
 
   async startDebugSession(options: DebugSessionOptions): Promise<void> {
+    const cfg = ConfigurationService.getConfig();
+    const connectionTimeoutMs = cfg.debugConnectionTimeout * 1000;
+    const maxRetries = cfg.debugRetries;
+
     this.logger.appendLine(`DebugService: Starting debug session for ${options.className}.${options.testName} on port ${options.debugPort}`);
 
     // Wait for JVM to be ready
-    const jvmReady = await this.waitForJvmDebugPort(options.debugPort, 60000);
+    const jvmReady = await this.waitForJvmDebugPort(options.debugPort, connectionTimeoutMs);
     if (!jvmReady) {
-      throw new Error(`JVM not ready on port ${options.debugPort} after 60 seconds`);
+      throw new Error(`JVM not ready on port ${options.debugPort} after ${cfg.debugConnectionTimeout} seconds`);
     }
 
     this.logger.appendLine(`DebugService: JVM is ready on port ${options.debugPort}, starting debug session...`);
 
     let retryCount = 0;
-    const maxRetries = 3;
     
     while (retryCount < maxRetries) {
       try {

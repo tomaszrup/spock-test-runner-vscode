@@ -1,6 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { BuildToolService } from './services/BuildToolService';
+import { ConfigurationService } from './services/ConfigurationService';
 import { DebugService } from './services/DebugService';
 import { TestExecutionService } from './services/TestExecutionService';
 import { SpockTestController } from './testController';
@@ -90,11 +91,12 @@ async function runSpockTest(
     if (debug) {
       // Auto-attach the debugger after Gradle starts the JVM with --debug-jvm
       const debugService = new DebugService(logger);
+      const debugPort = ConfigurationService.getConfig().debugPort;
       debugService.startDebugSession({
         workspacePath,
         className: testClassName,
         testName: testMethod || '',
-        debugPort: 5005
+        debugPort
       }).then(() => {
         logger.appendLine('[INFO] Debug session attached successfully');
       }).catch(error => {

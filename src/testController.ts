@@ -2,10 +2,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { BuildToolService } from './services/BuildToolService';
+import { CoverageService, SpockFileCoverage } from './services/CoverageService';
 import { TestDiscoveryService } from './services/TestDiscoveryService';
 import { TestExecutionService } from './services/TestExecutionService';
 import { TestResultParser } from './services/TestResultParser';
-import { TestIterationResult } from './types';
+import { SpockAnnotation, TestIterationResult, DiffInfo } from './types';
 
 export class SpockTestController {
   private controller: vscode.TestController;
@@ -13,8 +14,10 @@ export class SpockTestController {
   private testData = new WeakMap<vscode.TestItem, TestData>();
   private testExecutionService: TestExecutionService;
   private testResultParser: TestResultParser;
+  private coverageService: CoverageService;
   private iterationItems = new Map<string, vscode.TestItem[]>(); // Track iteration items by file URI
   private projectItems = new Map<string, vscode.TestItem>(); // Track project nodes by project root path
+  private knownSpecBaseClasses = new Set<string>(); // Workspace-level spec base class names for inheritance resolution
 
   constructor(context: vscode.ExtensionContext, logger: vscode.OutputChannel) {
     this.logger = logger;
@@ -27,6 +30,7 @@ export class SpockTestController {
     
     this.testExecutionService = new TestExecutionService(this.logger);
     this.testResultParser = new TestResultParser(this.logger);
+    this.coverageService = new CoverageService(this.logger);
     this.logger.appendLine('SpockTestController: TestController created');
 
     this.setupTestController();
@@ -85,15 +89,17 @@ export class SpockTestController {
 
       watcher.onDidCreate(uri => {
         // Only process files that are NOT in the bin directory
-        if (!uri.fsPath.includes('/bin/')) {
-          this.logger.appendLine(`SpockTestController: File created: ${uri.fsPath}`);
+        const fsPath = uri.fsPath;
+        if (!fsPath.includes('/bin/') && !fsPath.includes('\\bin\\')) {
+          this.logger.appendLine(`SpockTestController: File created: ${fsPath}`);
           this.discoverTestsInFile(this.getOrCreateFile(uri));
         }
       });
       watcher.onDidChange(uri => {
         // Only process files that are NOT in the bin directory
-        if (!uri.fsPath.includes('/bin/')) {
-          this.logger.appendLine(`SpockTestController: File changed: ${uri.fsPath}`);
+        const fsPath = uri.fsPath;
+        if (!fsPath.includes('/bin/') && !fsPath.includes('\\bin\\')) {
+          this.logger.appendLine(`SpockTestController: File changed: ${fsPath}`);
           this.discoverTestsInFile(this.getOrCreateFile(uri));
         }
       });
@@ -127,6 +133,21 @@ export class SpockTestController {
       true,
       runnableTag
     );
+
+    const coverageProfile = this.controller.createRunProfile(
+      'Coverage',
+      vscode.TestRunProfileKind.Coverage,
+      (request, token) => this.runHandler(false, request, token, true),
+      true,
+      runnableTag
+    );
+
+    coverageProfile.loadDetailedCoverage = async (_testRun, fileCoverage, _token) => {
+      if (fileCoverage instanceof SpockFileCoverage) {
+        return fileCoverage.details;
+      }
+      return [];
+    };
   }
 
   private registerCommands(context: vscode.ExtensionContext): void {
@@ -162,6 +183,10 @@ export class SpockTestController {
 
     this.logger.appendLine(`SpockTestController: Found ${vscode.workspace.workspaceFolders.length} workspace folders`);
     
+    // Phase 1: Scan all .groovy files and collect class declarations for inheritance resolution
+    const allFileContents = new Map<string, { uri: vscode.Uri; content: string }>();
+    const allClassDeclarations: Array<{ name: string; parent: string; isAbstract: boolean }> = [];
+
     for (const workspaceFolder of vscode.workspace.workspaceFolders) {
       this.logger.appendLine(`SpockTestController: Searching in workspace: ${workspaceFolder.uri.fsPath}`);
       const pattern = new vscode.RelativePattern(workspaceFolder, '**/*.groovy');
@@ -171,10 +196,28 @@ export class SpockTestController {
       this.logger.appendLine(`SpockTestController: Found ${files.length} .groovy files`);
       
       for (const file of files) {
-        this.logger.appendLine(`SpockTestController: Processing file: ${file.fsPath}`);
-        const fileItem = this.getOrCreateFile(file);
-        await this.discoverTestsInFile(fileItem);
+        try {
+          const document = await vscode.workspace.openTextDocument(file);
+          const content = document.getText();
+          allFileContents.set(file.toString(), { uri: file, content });
+          const declarations = TestDiscoveryService.scanClassDeclarations(content);
+          allClassDeclarations.push(...declarations);
+        } catch (error) {
+          this.logger.appendLine(`SpockTestController: Error reading file ${file.fsPath}: ${error}`);
+        }
       }
+    }
+
+    // Phase 2: Resolve cross-file inheritance to determine all spec base classes
+    this.knownSpecBaseClasses = TestDiscoveryService.resolveAllSpecBaseClasses(allClassDeclarations);
+    this.logger.appendLine(`SpockTestController: Resolved ${this.knownSpecBaseClasses.size} spec base class names: ${[...this.knownSpecBaseClasses].join(', ')}`);
+
+    // Phase 3: Parse all files with full inheritance knowledge
+    for (const [uriStr, { uri, content }] of allFileContents) {
+      this.logger.appendLine(`SpockTestController: Processing file: ${uri.fsPath}`);
+      const fileItem = this.getOrCreateFile(uri);
+      this.cleanupIterationItems(fileItem.uri!.toString());
+      this.parseTestsInFile(fileItem, content, this.knownSpecBaseClasses);
     }
   }
 
@@ -216,7 +259,20 @@ export class SpockTestController {
     try {
       const document = await vscode.workspace.openTextDocument(file.uri);
       const content = document.getText();
-      this.parseTestsInFile(file, content);
+
+      // If the file introduces new class declarations, update the workspace-level
+      // inheritance map so that specs extending local base classes are found.
+      const declarations = TestDiscoveryService.scanClassDeclarations(content);
+      for (const decl of declarations) {
+        // Re-resolve: if this file defines a class extending Specification,
+        // add it so other files (and this file) can reference it.
+        if (this.knownSpecBaseClasses.has(decl.parent) ||
+            (decl.parent.includes('.') && this.knownSpecBaseClasses.has(decl.parent.split('.').pop()!))) {
+          this.knownSpecBaseClasses.add(decl.name);
+        }
+      }
+
+      this.parseTestsInFile(file, content, this.knownSpecBaseClasses);
     } catch (error) {
       this.logger.appendLine(`Error discovering tests in ${file.uri.fsPath}: ${error}`);
     }
@@ -257,7 +313,7 @@ export class SpockTestController {
     return file;
   }
 
-  private parseTestsInFile(file: vscode.TestItem, content: string): void {
+  private parseTestsInFile(file: vscode.TestItem, content: string, knownSpecBaseClasses?: Set<string>): void {
     if (!file.uri) {
       return;
     }
@@ -267,39 +323,80 @@ export class SpockTestController {
     // Clear existing children
     file.children.replace([]);
 
-    const testClasses = TestDiscoveryService.parseTestsInFile(content);
+    const testClasses = TestDiscoveryService.parseTestsInFile(content, knownSpecBaseClasses);
     let testCount = 0;
     let hasRunnableClasses = false;
+    let hasAnyClasses = false;
 
     for (const testClass of testClasses) {
       this.logger.appendLine(`SpockTestController: Found test class: ${testClass.name}`);
       
-      // ADD DEBUG HERE - shows class details
-      this.logger.appendLine(`[DEBUG] Class ${testClass.name} - isAbstract: ${testClass.isAbstract}`);
+      this.logger.appendLine(`[DEBUG] Class ${testClass.name} - isAbstract: ${testClass.isAbstract}, annotations: ${JSON.stringify(testClass.annotations?.map(a => a.name))}`);
       
       // Skip abstract classes entirely - they shouldn't appear in the test tree
       if (testClass.isAbstract) {
         this.logger.appendLine(`[DEBUG] Class ${testClass.name} - SKIPPED (abstract class)`);
         continue;
       }
+
+      hasAnyClasses = true;
+
+      // Check class-level annotations
+      const classIgnored = TestDiscoveryService.hasAnnotation(testClass.annotations, 'Ignore');
+      const classStepwise = TestDiscoveryService.hasAnnotation(testClass.annotations, 'Stepwise');
+      const classPending = TestDiscoveryService.hasAnnotation(testClass.annotations, 'PendingFeature');
+      const classConditional = TestDiscoveryService.hasAnnotation(testClass.annotations, 'IgnoreIf')
+        || TestDiscoveryService.hasAnnotation(testClass.annotations, 'Requires');
+
+      // Build the class label with annotation indicators
+      let classLabel = testClass.name;
+      if (classIgnored) {
+        classLabel = `${testClass.name} ⊘ Ignored`;
+      } else if (classStepwise) {
+        classLabel = `${testClass.name} ⟳ Stepwise`;
+      }
       
       const classItem = this.controller.createTestItem(
         `${file.uri.toString()}#${testClass.name}`,
-        testClass.name,
+        classLabel,
         file.uri
       );
       classItem.range = testClass.range;
-      classItem.tags = [new vscode.TestTag('runnable')];
-      hasRunnableClasses = true;
-      this.logger.appendLine(`[DEBUG] Class ${testClass.name} - ASSIGNED runnable tag`);
+
+      if (classIgnored) {
+        // Ignored classes still shown but not runnable
+        classItem.tags = [];
+        classItem.description = this.formatAnnotationDescription(testClass.annotations);
+      } else {
+        classItem.tags = [new vscode.TestTag('runnable')];
+        hasRunnableClasses = true;
+        if (classConditional || classStepwise) {
+          classItem.description = this.formatAnnotationDescription(testClass.annotations);
+        }
+      }
+
+      this.logger.appendLine(`[DEBUG] Class ${testClass.name} - label: "${classLabel}", ignored: ${classIgnored}`);
       this.testData.set(classItem, { type: 'class', className: testClass.name });
       file.children.add(classItem);
 
       for (const testMethod of testClass.methods) {
         this.logger.appendLine(`SpockTestController: Found test method: ${testMethod.name}`);
-        
-        // ADD DEBUG HERE - shows method details
-        this.logger.appendLine(`[DEBUG] Method ${testMethod.name} in class ${testClass.name}`);
+
+        // Determine effective method-level annotations (class @Ignore propagates)
+        const methodIgnored = classIgnored || TestDiscoveryService.hasAnnotation(testMethod.annotations, 'Ignore');
+        const methodPending = classPending || TestDiscoveryService.hasAnnotation(testMethod.annotations, 'PendingFeature');
+        const methodConditional = TestDiscoveryService.hasAnnotation(testMethod.annotations, 'IgnoreIf')
+          || TestDiscoveryService.hasAnnotation(testMethod.annotations, 'Requires');
+
+        // Build label with annotation indicators
+        let methodLabel = testMethod.name;
+        if (methodIgnored) {
+          methodLabel = `${testMethod.name} ⊘`;
+        } else if (methodPending) {
+          methodLabel = `${testMethod.name} ⏳`;
+        }
+
+        this.logger.appendLine(`[DEBUG] Method ${testMethod.name} in class ${testClass.name} - ignored: ${methodIgnored}, pending: ${methodPending}`);
         
         testCount++;
         
@@ -308,13 +405,23 @@ export class SpockTestController {
           // Create parent test item for data-driven test
           const parentTestItem = this.controller.createTestItem(
             `${file.uri.toString()}#${testClass.name}#${testMethod.name}`,
-            testMethod.name,
+            methodLabel,
             file.uri
           );
           parentTestItem.range = testMethod.range;
           parentTestItem.canResolveChildren = false;
-          parentTestItem.tags = [new vscode.TestTag('runnable')];
-          this.logger.appendLine(`[DEBUG] Data-driven method ${testMethod.name} - ASSIGNED runnable tag`);
+
+          if (methodIgnored) {
+            parentTestItem.tags = [];
+            parentTestItem.description = this.formatAnnotationDescription(testMethod.annotations);
+          } else {
+            parentTestItem.tags = [new vscode.TestTag('runnable')];
+            if (methodPending || methodConditional) {
+              parentTestItem.description = this.formatAnnotationDescription(testMethod.annotations);
+            }
+          }
+
+          this.logger.appendLine(`[DEBUG] Data-driven method ${testMethod.name} - ignored: ${methodIgnored}`);
           this.testData.set(parentTestItem, {
             type: 'test',
             className: testClass.name,
@@ -330,12 +437,22 @@ export class SpockTestController {
           // Regular test method
           const testItem = this.controller.createTestItem(
             `${file.uri.toString()}#${testClass.name}#${testMethod.name}`,
-            testMethod.name,
+            methodLabel,
             file.uri
           );
           testItem.range = testMethod.range;
-          testItem.tags = [new vscode.TestTag('runnable')];
-          this.logger.appendLine(`[DEBUG] Regular method ${testMethod.name} - ASSIGNED runnable tag`);
+
+          if (methodIgnored) {
+            testItem.tags = [];
+            testItem.description = this.formatAnnotationDescription(testMethod.annotations);
+          } else {
+            testItem.tags = [new vscode.TestTag('runnable')];
+            if (methodPending || methodConditional) {
+              testItem.description = this.formatAnnotationDescription(testMethod.annotations);
+            }
+          }
+
+          this.logger.appendLine(`[DEBUG] Regular method ${testMethod.name} - ignored: ${methodIgnored}`);
           this.testData.set(testItem, {
             type: 'test',
             className: testClass.name,
@@ -350,6 +467,10 @@ export class SpockTestController {
     if (hasRunnableClasses) {
       file.tags = [new vscode.TestTag('runnable')];
       this.logger.appendLine(`[DEBUG] File ${file.uri.fsPath} - ASSIGNED runnable tag (has runnable classes)`);
+    } else if (hasAnyClasses) {
+      // File has classes (e.g. all @Ignore) but none are runnable – keep in tree without runnable tag
+      file.tags = [];
+      this.logger.appendLine(`[DEBUG] File ${file.uri.fsPath} - Kept in tree (has classes, none runnable)`);
     } else {
       // Remove files with no runnable tests from the tree entirely
       this.logger.appendLine(`[DEBUG] File ${file.uri.fsPath} - Removing from tree (no runnable tests)`);
@@ -374,10 +495,10 @@ export class SpockTestController {
     this.logger.appendLine(`SpockTestController: Parsed ${testCount} tests in file: ${file.uri.fsPath}`);
   }
 
-  private async runHandler(debug: boolean, request: vscode.TestRunRequest, token: vscode.CancellationToken): Promise<void> {
+  private async runHandler(debug: boolean, request: vscode.TestRunRequest, token: vscode.CancellationToken, coverage: boolean = false): Promise<void> {
     const run = this.controller.createTestRun(request);
 
-    this.logger.appendLine(`SpockTestController: runHandler called. debug=${debug}`);
+    this.logger.appendLine(`SpockTestController: runHandler called. debug=${debug}, coverage=${coverage}`);
     this.logger.appendLine(`SpockTestController: request.include=${request.include ? request.include.length + ' items' : 'undefined (run all)'}`);
     if (request.include) {
       for (const item of request.include) {
@@ -450,7 +571,7 @@ export class SpockTestController {
     // Phase 3: Execute each group as a single batch
     for (const [projectRoot, tests] of groups) {
       if (token.isCancellationRequested) { break; }
-      await this.runBatch(projectRoot, tests, run, debug, token);
+      await this.runBatch(projectRoot, tests, run, debug, token, coverage);
     }
 
     run.end();
@@ -461,9 +582,22 @@ export class SpockTestController {
     tests: Array<{test: vscode.TestItem, data: TestData}>,
     run: vscode.TestRun,
     debug: boolean,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
+    coverage: boolean = false
   ): Promise<void> {
     const start = Date.now();
+
+    // Resolve the Gradle root project (where settings.gradle / gradlew live)
+    // and derive the subproject prefix for multi-module builds.
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    const gradleRootProject = workspaceFolder
+      ? BuildToolService.findGradleRootProject(projectRoot, workspaceFolder.uri.fsPath)
+      : projectRoot;
+    const subprojectPrefix = BuildToolService.getSubprojectPrefix(gradleRootProject, projectRoot);
+
+    if (subprojectPrefix) {
+      this.logger.appendLine(`SpockTestController: Multi-module detected — root: ${gradleRootProject}, subproject prefix: ${subprojectPrefix}`);
+    }
 
     // Mark all tests as started
     for (const {test} of tests) {
@@ -496,20 +630,24 @@ export class SpockTestController {
     }
 
     const commandArgs = BuildToolService.buildBatchCommandArgs(
-      testFilters, debug, projectRoot, this.logger
+      testFilters, debug, gradleRootProject, this.logger, subprojectPrefix, coverage
     );
 
-    this.logger.appendLine(`SpockTestController: Running batch of ${tests.length} test(s) in ${projectRoot}`);
+    this.logger.appendLine(`SpockTestController: Running batch of ${tests.length} test(s) in ${projectRoot}${coverage ? ' (with coverage)' : ''}`);
+    this.logger.appendLine(`SpockTestController: Gradle root project: ${gradleRootProject}`);
     this.logger.appendLine(`SpockTestController: Command: ${commandArgs.join(' ')}`);
     this.logger.appendLine(`SpockTestController: Test filters: ${JSON.stringify(testFilters)}`);
 
     // Execute with real-time output parsing
+    // CWD must be the root project (where gradlew lives), but test result
+    // XML files are under the subproject's build/ directory.
     const result = await this.testExecutionService.executeBatch({
       commandArgs,
-      workspacePath: projectRoot,
+      workspacePath: gradleRootProject,
       run,
       testItems: tests.map(t => t.test),
       debug,
+      token,
       onOutputLine: (line: string) => {
         // Parse Gradle test output: "ClassName > test name PASSED/FAILED/SKIPPED"
         const match = line.match(/^\s*(\S+)\s+>\s+(.+?)\s+(PASSED|FAILED|SKIPPED)\s*$/);
@@ -542,6 +680,17 @@ export class SpockTestController {
       }
     });
 
+    // If cancelled, mark all unresolved tests as skipped and return early
+    if (token.isCancellationRequested) {
+      for (const [, entry] of testLookup) {
+        if (!entry.resolved) {
+          run.skipped(entry.test);
+          entry.resolved = true;
+        }
+      }
+      return;
+    }
+
     // Handle data-driven tests that need iteration results
     for (const [key, entry] of testLookup) {
       if (entry.data.isDataDriven && !entry.resolved) {
@@ -572,7 +721,7 @@ export class SpockTestController {
             if (xmlResult.success) {
               run.passed(entry.test, Date.now() - start);
             } else {
-              run.failed(entry.test, new vscode.TestMessage(xmlResult.errorMessage || 'Test failed'), Date.now() - start);
+              run.failed(entry.test, this.createTestMessage(xmlResult.errorMessage || 'Test failed', xmlResult.diff), Date.now() - start);
             }
           }
         }
@@ -586,8 +735,23 @@ export class SpockTestController {
           run.passed(entry.test, Date.now() - start);
         } else {
           const errorMessage = this.extractErrorFromOutput(result.output, entry.data.className!, entry.data.testName!);
-          run.failed(entry.test, new vscode.TestMessage(errorMessage), Date.now() - start);
+          run.failed(entry.test, this.createTestMessage(errorMessage), Date.now() - start);
         }
+      }
+    }
+
+    // Phase: Attach coverage data if this is a coverage run
+    if (coverage) {
+      this.logger.appendLine('SpockTestController: Parsing JaCoCo coverage report...');
+      const xmlPath = this.coverageService.findJacocoXmlReport(projectRoot);
+      if (xmlPath) {
+        const fileCoverages = this.coverageService.parseJacocoReport(xmlPath, projectRoot);
+        for (const fc of fileCoverages) {
+          run.addCoverage(fc);
+        }
+        this.logger.appendLine(`SpockTestController: Added ${fileCoverages.length} file coverage entries`);
+      } else {
+        this.logger.appendLine('SpockTestController: No JaCoCo XML report found — coverage data unavailable');
       }
     }
   }
@@ -629,7 +793,7 @@ export class SpockTestController {
           run.passed(test, Date.now() - Date.now());
         } else {
           const errorMessage = this.extractErrorFromOutput(result.output || '', data.className!, data.testName!);
-          const message = new vscode.TestMessage(errorMessage);
+          const message = this.createTestMessage(errorMessage);
           run.failed(test, message, Date.now() - Date.now());
         }
       }
@@ -640,7 +804,7 @@ export class SpockTestController {
         run.passed(test, Date.now() - Date.now());
       } else {
         const errorMessage = this.extractErrorFromOutput(result.output || '', data.className!, data.testName!);
-        const message = new vscode.TestMessage(errorMessage);
+        const message = this.createTestMessage(errorMessage);
         run.failed(test, message, Date.now() - Date.now());
       }
     }
@@ -797,7 +961,10 @@ export class SpockTestController {
       if (iteration.success) {
         run.passed(iterationItem, iteration.duration * 1000);
       } else {
-        const message = new vscode.TestMessage(iteration.errorInfo?.error || 'Iteration failed');
+        const message = this.createTestMessage(
+          iteration.errorInfo?.error || 'Iteration failed',
+          iteration.errorInfo?.diff
+        );
         if (iteration.errorInfo?.location) {
           message.location = iteration.errorInfo.location;
         }
@@ -830,7 +997,7 @@ export class SpockTestController {
         summaryParts.push('');
       }
       
-      const message = new vscode.TestMessage(summaryParts.join('\n'));
+      const message = this.createTestMessage(summaryParts.join('\n'));
       run.failed(parentTest, message, Date.now() - Date.now());
     }
   }
@@ -910,6 +1077,51 @@ export class SpockTestController {
     return entries
       .map(([key, value]) => `${key}: ${value}`)
       .join(', ');
+  }
+
+  /**
+   * Create a TestMessage, using diff() when expected/actual values are available
+   * so VS Code renders a rich inline diff view.
+   */
+  private createTestMessage(errorText: string, diff?: DiffInfo): vscode.TestMessage {
+    if (diff) {
+      return vscode.TestMessage.diff(errorText, diff.expected, diff.actual);
+    }
+    // Try to extract diff info from the error text as a fallback
+    const parsed = this.testResultParser.parseExpectedActual(errorText);
+    if (parsed) {
+      return vscode.TestMessage.diff(errorText, parsed.expected, parsed.actual);
+    }
+    return new vscode.TestMessage(errorText);
+  }
+
+  /**
+   * Build a human-readable description string from a list of annotations.
+   * Used as the `description` property of test items to show annotation context
+   * in the Test Explorer sidebar.
+   */
+  private formatAnnotationDescription(annotations: SpockAnnotation[] | undefined): string {
+    if (!annotations || annotations.length === 0) {
+      return '';
+    }
+
+    const DISPLAY_ANNOTATIONS = new Set([
+      'Ignore', 'PendingFeature', 'Stepwise', 'IgnoreIf', 'IgnoreRest',
+      'Requires', 'Timeout', 'Issue'
+    ]);
+
+    const parts: string[] = [];
+    for (const a of annotations) {
+      if (!DISPLAY_ANNOTATIONS.has(a.name)) {
+        continue;
+      }
+      if (a.argument) {
+        parts.push(`@${a.name}(${a.argument})`);
+      } else {
+        parts.push(`@${a.name}`);
+      }
+    }
+    return parts.join(' ');
   }
 }
 

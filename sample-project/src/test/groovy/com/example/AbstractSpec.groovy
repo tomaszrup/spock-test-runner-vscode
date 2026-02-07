@@ -2,6 +2,7 @@ package com.example
 
 import spock.lang.Specification
 
+
 abstract class AbstractSpec extends Specification {
 
     def "abstract test method"() {
