@@ -1,0 +1,10 @@
+allprojects {
+  tasks.matching { it.name == "test" || it instanceof Test }.configureEach {
+    // Force test tasks to run (injected by Spock Test Runner extension)
+    outputs.upToDateWhen { false }
+    // Enable real-time test result output for the extension to parse
+    testLogging {
+      events "passed", "failed", "skipped"
+    }
+  }
+}

@@ -1,0 +1,109 @@
+{
+  "name": "spock-test-runner-vscode",
+  "displayName": "Spock Test Runner",
+  "description": "Test runner for Spock Groovy tests in Java projects with VS Code Test API integration",
+  "version": "0.0.3",
+  "copyright": "Copyright 2025 Lukas Zaruba, Copyright 2026 Tomasz Rup",
+  "publisher": "TRup",
+  "author": "Tomasz Rup",
+  "originalAuthor": "Lukas Zaruba",
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TomaszRup/spock-test-runner-vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Testing",
+    "Debuggers"
+  ],
+  "keywords": [
+    "spock",
+    "groovy",
+    "testing",
+    "java",
+    "gradle",
+    "maven"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:groovy",
+    "workspaceContains:**/*.groovy"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "spock-test-runner-vscode.runTest",
+        "title": "Run Spock Test"
+      },
+      {
+        "command": "spock-test-runner-vscode.runSpecificTest",
+        "title": "Run This Test"
+      },
+      {
+        "command": "spock-test-runner-vscode.debugSpecificTest",
+        "title": "Debug This Test"
+      },
+      {
+        "command": "spock-test-runner.reloadTests",
+        "title": "Reload Spock Tests",
+        "category": "Spock Test Runner"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "when": "resourceLangId == groovy",
+          "command": "spock-test-runner-vscode.runTest",
+          "group": "navigation"
+        }
+      ]
+    },
+    "languages": [
+      {
+        "id": "groovy",
+        "aliases": [
+          "Groovy",
+          "groovy"
+        ],
+        "extensions": [
+          ".groovy",
+          ".gvy",
+          ".gy",
+          ".gsh"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "files.associations": {
+      "*.groovy": "groovy",
+      "*.gvy": "groovy",
+      "*.gy": "groovy",
+      "*.gsh": "groovy"
+    },
+    "breakpoints": [
+      {
+        "language": "groovy"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package",
+    "run-vscode": "./run-vscode.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.3.3",
+    "@vscode/vsce": "^3.0.0"
+  }
+}
