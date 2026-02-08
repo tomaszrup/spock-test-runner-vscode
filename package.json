@@ -2,7 +2,7 @@
   "name": "spock-test-runner-vscode-tr",
   "displayName": "Spock Test Runner & Debugger",
   "description": "Run, debug, and measure code coverage of Spock Framework (Groovy) tests using Gradle or Maven, with native VS Code Test Explorer integration",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "copyright": "Copyright 2025 Lukas Zaruba, Copyright 2026 Tomasz Rup",
   "publisher": "TomaszRup",
   "author": "Tomasz Rup",
