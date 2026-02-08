@@ -128,9 +128,14 @@ describe('types', () => {
   // ── BuildTool ─────────────────────────────────────────────────────
 
   describe('BuildTool', () => {
-    it('should only be gradle', () => {
+    it('should accept gradle', () => {
       const bt: BuildTool = 'gradle';
       expect(bt).toBe('gradle');
+    });
+
+    it('should accept maven', () => {
+      const bt: BuildTool = 'maven';
+      expect(bt).toBe('maven');
     });
   });
 

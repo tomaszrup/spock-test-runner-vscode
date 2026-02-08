@@ -77,6 +77,14 @@ describe('CoverageService', () => {
       const result = service.findJacocoXmlReport('/project');
       expect(result).toBe(deepXml);
     });
+
+    it('should find Maven JaCoCo report at standard path', () => {
+      const expectedPath = path.join('/project', 'target', 'site', 'jacoco', 'jacoco.xml');
+      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => String(p) === expectedPath);
+
+      const result = service.findJacocoXmlReport('/project');
+      expect(result).toBe(expectedPath);
+    });
   });
 
   // ── parseJacocoReport ─────────────────────────────────────────────

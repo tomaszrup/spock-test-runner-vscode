@@ -15,8 +15,12 @@ export interface SpockTestRunnerConfig {
   debugRetries: number;
   /** Extra Gradle CLI arguments. Default: [] */
   additionalGradleArgs: string[];
+  /** Extra Maven CLI arguments. Default: [] */
+  additionalMavenArgs: string[];
   /** Output channel log level. Default: 'info' */
   logLevel: LogLevel;
+  /** (Preview) Show inline diff view for failed assertions. Default: true */
+  showDiffView: boolean;
 }
 
 /**
@@ -44,7 +48,9 @@ export class ConfigurationService {
       debugConnectionTimeout: cfg.get<number>('debugConnectionTimeout', 60),
       debugRetries: cfg.get<number>('debugRetries', 3),
       additionalGradleArgs: cfg.get<string[]>('additionalGradleArgs', []),
+      additionalMavenArgs: cfg.get<string[]>('additionalMavenArgs', []),
       logLevel: cfg.get<LogLevel>('logLevel', 'info'),
+      showDiffView: cfg.get<boolean>('showDiffView', false),
     };
   }
 

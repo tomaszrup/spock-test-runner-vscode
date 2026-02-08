@@ -6,7 +6,8 @@ import { CoverageService, SpockFileCoverage } from './services/CoverageService';
 import { TestDiscoveryService } from './services/TestDiscoveryService';
 import { TestExecutionService } from './services/TestExecutionService';
 import { TestResultParser } from './services/TestResultParser';
-import { SpockAnnotation, TestIterationResult, DiffInfo } from './types';
+import { ConfigurationService } from './services/ConfigurationService';
+import { SpockAnnotation, TestIterationResult, DiffInfo, BuildTool } from './types';
 
 export class SpockTestController {
   private controller: vscode.TestController;
@@ -297,10 +298,10 @@ export class SpockTestController {
     file.tags = []; // Will be set properly in parseTestsInFile based on content
     this.testData.set(file, { type: 'file' });
 
-    // Find the Gradle project root for this file and nest under it
+    // Find the project root (Gradle or Maven) for this file and nest under it
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
     if (workspaceFolder) {
-      const projectRoot = BuildToolService.findGradleProjectRoot(uri.fsPath, workspaceFolder.uri.fsPath);
+      const projectRoot = BuildToolService.findProjectRoot(uri.fsPath, workspaceFolder.uri.fsPath);
       if (projectRoot) {
         const projectNode = this.getOrCreateProjectNode(projectRoot, workspaceFolder);
         projectNode.children.add(file);
@@ -561,7 +562,7 @@ export class SpockTestController {
       const workspaceFolder = vscode.workspace.getWorkspaceFolder(item.test.uri);
       if (!workspaceFolder) { continue; }
 
-      const projectRoot = BuildToolService.findGradleProjectRoot(item.test.uri.fsPath, workspaceFolder.uri.fsPath);
+      const projectRoot = BuildToolService.findProjectRoot(item.test.uri.fsPath, workspaceFolder.uri.fsPath);
       if (!projectRoot) { continue; }
 
       if (!groups.has(projectRoot)) { groups.set(projectRoot, []); }
@@ -587,16 +588,24 @@ export class SpockTestController {
   ): Promise<void> {
     const start = Date.now();
 
-    // Resolve the Gradle root project (where settings.gradle / gradlew live)
-    // and derive the subproject prefix for multi-module builds.
+    // Detect the build tool for this project
+    const buildTool: BuildTool = BuildToolService.detectBuildTool(projectRoot) || 'gradle';
+
+    // Resolve the root project (where settings.gradle / gradlew or parent pom.xml live)
+    // and derive the subproject/module identifier for multi-module builds.
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    const gradleRootProject = workspaceFolder
-      ? BuildToolService.findGradleRootProject(projectRoot, workspaceFolder.uri.fsPath)
+    const rootProject = workspaceFolder
+      ? BuildToolService.findRootProject(projectRoot, workspaceFolder.uri.fsPath)
       : projectRoot;
-    const subprojectPrefix = BuildToolService.getSubprojectPrefix(gradleRootProject, projectRoot);
+
+    // For Gradle: subproject prefix like ":moduleA"
+    // For Maven: module name like "moduleA" (used with -pl)
+    const subprojectPrefix = buildTool === 'gradle'
+      ? BuildToolService.getSubprojectPrefix(rootProject, projectRoot)
+      : BuildToolService.getMavenModuleName(rootProject, projectRoot);
 
     if (subprojectPrefix) {
-      this.logger.appendLine(`SpockTestController: Multi-module detected — root: ${gradleRootProject}, subproject prefix: ${subprojectPrefix}`);
+      this.logger.appendLine(`SpockTestController: Multi-module detected — root: ${rootProject}, ${buildTool === 'gradle' ? 'subproject prefix' : 'module name'}: ${subprojectPrefix}`);
     }
 
     // Mark all tests as started
@@ -630,51 +639,51 @@ export class SpockTestController {
     }
 
     const commandArgs = BuildToolService.buildBatchCommandArgs(
-      testFilters, debug, gradleRootProject, this.logger, subprojectPrefix, coverage
+      testFilters, debug, rootProject, this.logger, subprojectPrefix, coverage, buildTool
     );
 
     this.logger.appendLine(`SpockTestController: Running batch of ${tests.length} test(s) in ${projectRoot}${coverage ? ' (with coverage)' : ''}`);
-    this.logger.appendLine(`SpockTestController: Gradle root project: ${gradleRootProject}`);
+    this.logger.appendLine(`SpockTestController: Build tool: ${buildTool}, root project: ${rootProject}`);
     this.logger.appendLine(`SpockTestController: Command: ${commandArgs.join(' ')}`);
     this.logger.appendLine(`SpockTestController: Test filters: ${JSON.stringify(testFilters)}`);
 
     // Execute with real-time output parsing
-    // CWD must be the root project (where gradlew lives), but test result
-    // XML files are under the subproject's build/ directory.
+    // CWD must be the root project (where gradlew / mvnw lives), but test result
+    // XML files are under the subproject's build/ or target/ directory.
     const result = await this.testExecutionService.executeBatch({
       commandArgs,
-      workspacePath: gradleRootProject,
+      workspacePath: rootProject,
       run,
       testItems: tests.map(t => t.test),
       debug,
       token,
       onOutputLine: (line: string) => {
         // Parse Gradle test output: "ClassName > test name PASSED/FAILED/SKIPPED"
-        const match = line.match(/^\s*(\S+)\s+>\s+(.+?)\s+(PASSED|FAILED|SKIPPED)\s*$/);
-        if (!match) { return; }
+        const gradleMatch = line.match(/^\s*(\S+)\s+>\s+(.+?)\s+(PASSED|FAILED|SKIPPED)\s*$/);
+        if (gradleMatch) {
+          const className = gradleMatch[1];
+          const testPart = gradleMatch[2].trim();
+          const status = gradleMatch[3];
 
-        const className = match[1];
-        const testPart = match[2].trim();
-        const status = match[3];
+          // Skip data-driven iteration lines like "Class > testName > iteration PASSED"
+          // or "Class > testName [params, #N] PASSED" — let handleDataDrivenTestResults process those
+          if (testPart.includes(' > ') || /\[.*#\d+\]$/.test(testPart)) {
+            return;
+          }
 
-        // Skip data-driven iteration lines like "Class > testName > iteration PASSED"
-        // or "Class > testName [params, #N] PASSED" — let handleDataDrivenTestResults process those
-        if (testPart.includes(' > ') || /\[.*#\d+\]$/.test(testPart)) {
-          return;
-        }
+          const key = `${className}#${testPart}`;
+          const entry = testLookup.get(key);
 
-        const key = `${className}#${testPart}`;
-        const entry = testLookup.get(key);
-
-        if (entry && !entry.resolved && !entry.data.isDataDriven) {
-          entry.resolved = true;
-          if (status === 'PASSED') {
-            run.passed(entry.test, Date.now() - start);
-          } else if (status === 'FAILED') {
-            // Don't resolve yet — let XML parsing provide detailed error info with stack trace
-            entry.resolved = false;
-          } else {
-            run.skipped(entry.test);
+          if (entry && !entry.resolved && !entry.data.isDataDriven) {
+            entry.resolved = true;
+            if (status === 'PASSED') {
+              run.passed(entry.test, Date.now() - start);
+            } else if (status === 'FAILED') {
+              // Don't resolve yet — let XML parsing provide detailed error info with stack trace
+              entry.resolved = false;
+            } else {
+              run.skipped(entry.test);
+            }
           }
         }
       }
@@ -695,7 +704,7 @@ export class SpockTestController {
     for (const [key, entry] of testLookup) {
       if (entry.data.isDataDriven && !entry.resolved) {
         try {
-          await this.handleDataDrivenTestResults(entry.test, entry.data, result, run, projectRoot);
+          await this.handleDataDrivenTestResults(entry.test, entry.data, result, run, projectRoot, buildTool);
           entry.resolved = true;
         } catch (error) {
           this.logger.appendLine(`SpockTestController: Error handling data-driven results: ${error}`);
@@ -712,7 +721,7 @@ export class SpockTestController {
     }
 
     for (const className of unresolvedClasses) {
-      const xmlResults = await this.testResultParser.parseClassTestResults(projectRoot, className);
+      const xmlResults = await this.testResultParser.parseClassTestResults(projectRoot, className, buildTool);
       for (const [key, entry] of testLookup) {
         if (!entry.resolved && entry.data.className === className && entry.data.testName) {
           const xmlResult = xmlResults.get(entry.data.testName);
@@ -764,7 +773,8 @@ export class SpockTestController {
     data: TestData, 
     result: any, 
     run: vscode.TestRun, 
-    workspacePath: string
+    workspacePath: string,
+    buildTool: BuildTool = 'gradle'
   ): Promise<void> {
     this.logger.appendLine(`SpockTestController: Handling data-driven test results for ${data.className}.${data.testName}`);
     
@@ -774,7 +784,8 @@ export class SpockTestController {
         result.output || '',
         data.testName!,
         data.className!,
-        workspacePath
+        workspacePath,
+        buildTool
       );
 
       if (iterationResults.length > 0) {
@@ -977,29 +988,10 @@ export class SpockTestController {
     // Store the new iteration items for this file
     this.iterationItems.set(fileUri, newIterationItems);
     
-    // Mark the parent test as passed/failed based on all iterations
-    const allPassed = iterationResults.every(iter => iter.success);
-    if (allPassed) {
-      run.passed(parentTest, Date.now() - Date.now());
-    } else {
-      const failedIterations = iterationResults.filter(iter => !iter.success);
-      const failedCount = failedIterations.length;
-      
-      // Build a detailed summary including each failed iteration's error
-      const summaryParts: string[] = [];
-      summaryParts.push(`${failedCount} of ${iterationResults.length} iterations failed\n`);
-      
-      for (const failed of failedIterations) {
-        const iterLabel = `[#${failed.index}] ${this.formatParameters(failed.parameters)}`;
-        const errorDetail = failed.errorInfo?.error || 'Unknown error';
-        summaryParts.push(`--- Iteration ${iterLabel} ---`);
-        summaryParts.push(errorDetail);
-        summaryParts.push('');
-      }
-      
-      const message = this.createTestMessage(summaryParts.join('\n'));
-      run.failed(parentTest, message, Date.now() - Date.now());
-    }
+    // Do NOT set explicit pass/fail on the parent test.
+    // VS Code infers the parent's status from its children, and this avoids
+    // the parent appearing as a separate entry in the Test Results tab —
+    // only the individual iterations will be shown there.
   }
 
   /**
@@ -1082,15 +1074,19 @@ export class SpockTestController {
   /**
    * Create a TestMessage, using diff() when expected/actual values are available
    * so VS Code renders a rich inline diff view.
+   * Gated behind the (Preview) `showDiffView` setting.
    */
   private createTestMessage(errorText: string, diff?: DiffInfo): vscode.TestMessage {
-    if (diff) {
+    const useDiff = ConfigurationService.getConfig().showDiffView;
+    if (useDiff && diff) {
       return vscode.TestMessage.diff(errorText, diff.expected, diff.actual);
     }
     // Try to extract diff info from the error text as a fallback
-    const parsed = this.testResultParser.parseExpectedActual(errorText);
-    if (parsed) {
-      return vscode.TestMessage.diff(errorText, parsed.expected, parsed.actual);
+    if (useDiff) {
+      const parsed = this.testResultParser.parseExpectedActual(errorText);
+      if (parsed) {
+        return vscode.TestMessage.diff(errorText, parsed.expected, parsed.actual);
+      }
     }
     return new vscode.TestMessage(errorText);
   }

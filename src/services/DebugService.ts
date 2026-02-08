@@ -158,8 +158,12 @@ export class DebugService {
       path.join(workspacePath, 'src', 'main', 'java'),
       path.join(workspacePath, 'src', 'test', 'kotlin'),
       path.join(workspacePath, 'src', 'main', 'kotlin'),
+      // Gradle generated sources
       path.join(workspacePath, 'build', 'generated', 'sources'),
-      path.join(workspacePath, 'build', 'generated', 'test-sources')
+      path.join(workspacePath, 'build', 'generated', 'test-sources'),
+      // Maven generated sources
+      path.join(workspacePath, 'target', 'generated-sources'),
+      path.join(workspacePath, 'target', 'generated-test-sources'),
     ];
   }
 

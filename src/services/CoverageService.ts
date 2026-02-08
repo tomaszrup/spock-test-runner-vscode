@@ -43,14 +43,17 @@ export class CoverageService {
 
   /**
    * Locate the JaCoCo XML report file under the project build directory.
-   * Checks common JaCoCo output paths for both Groovy and Kotlin DSL projects.
+   * Checks common JaCoCo output paths for Gradle and Maven projects.
    */
   findJacocoXmlReport(projectRoot: string): string | null {
     const candidates = [
+      // Gradle paths
       path.join(projectRoot, 'build', 'reports', 'jacoco', 'test', 'jacocoTestReport.xml'),
       path.join(projectRoot, 'build', 'reports', 'jacoco', 'test', 'html', 'jacocoTestReport.xml'),
-      // Some Gradle versions / configs place it here
       path.join(projectRoot, 'build', 'reports', 'jacoco', 'jacocoTestReport.xml'),
+      // Maven paths
+      path.join(projectRoot, 'target', 'site', 'jacoco', 'jacoco.xml'),
+      path.join(projectRoot, 'target', 'site', 'jacoco', 'jacocoTestReport.xml'),
     ];
 
     for (const candidate of candidates) {
@@ -60,13 +63,18 @@ export class CoverageService {
       }
     }
 
-    // Fallback: glob for any *.xml inside build/reports/jacoco
-    const jacocoDir = path.join(projectRoot, 'build', 'reports', 'jacoco');
-    if (fs.existsSync(jacocoDir)) {
-      const found = this.findXmlRecursive(jacocoDir);
-      if (found) {
-        this.logger.appendLine(`CoverageService: Found JaCoCo XML report (recursive) at ${found}`);
-        return found;
+    // Fallback: glob for any *.xml inside build/reports/jacoco or target/site/jacoco
+    const jacocoDirs = [
+      path.join(projectRoot, 'build', 'reports', 'jacoco'),
+      path.join(projectRoot, 'target', 'site', 'jacoco'),
+    ];
+    for (const jacocoDir of jacocoDirs) {
+      if (fs.existsSync(jacocoDir)) {
+        const found = this.findXmlRecursive(jacocoDir);
+        if (found) {
+          this.logger.appendLine(`CoverageService: Found JaCoCo XML report (recursive) at ${found}`);
+          return found;
+        }
       }
     }
 

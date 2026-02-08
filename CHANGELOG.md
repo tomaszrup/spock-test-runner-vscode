@@ -5,6 +5,33 @@ All notable changes to the "spock-test-runner-vscode" extension will be document
 **Author**: Tomasz Rup  
 **Original Author**: Lukas Zaruba
 
+## [0.0.6] - 2026-02-07
+
+### Added
+- **Code Coverage**: JaCoCo-based coverage support via Gradle init script (`coverage.init.gradle`)
+- **Coverage Run Profile**: New "Coverage" profile in Test Explorer parses JaCoCo XML reports and displays line-level results
+- **CoverageService**: Dedicated service for parsing JaCoCo XML and providing VS Code `FileCoverage` / `StatementCoverage` data
+- **Sub-module Support**: Sample project now includes a `sub-module/` Gradle sub-project for multi-module testing
+- **New Sample Specs**: `AnnotationSpec`, `DeliberateFailureSpec`, `IgnoredClassSpec`, `InheritedSpec`, `StepwiseSpec`
+- **Sub-module Sample Specs**: `MathHelperSpec`, `StringHelperSpec`, `IgnoredSubModuleSpec`, `StepwiseSubModuleSpec`
+- **Support Classes**: `Calculator.java`, `TestTrait.groovy` added to sample project
+
+### Changed
+- **Multi-module Gradle**: Build tool detection now walks up to find the Gradle root project via `settings.gradle`
+- **README**: Comprehensive rewrite to document all features, coverage, sub-module, and missing specs
+
+## [0.0.4] - 2025-12-01
+
+### Added
+- **Spock Annotation Support**: Recognition of `@Ignore`, `@PendingFeature`, `@Stepwise`, `@IgnoreIf`, `@Requires`, `@Timeout`, `@Unroll`, and more
+- **Annotation-aware Discovery**: Annotations are parsed and reflected in the test tree
+- **Unit Test Suite**: Vitest-based unit tests for all services (`BuildToolService`, `ConfigurationService`, `CoverageService`, `DebugService`, `TestDiscoveryService`, `TestResultParser`)
+- **VS Code Mock**: `__mocks__/vscode.ts` for testing without a running VS Code instance
+
+### Changed
+- **Test Framework**: Migrated from VS Code's built-in test runner to Vitest
+- **Improved Types**: Expanded `SpockAnnotation` and `TestData` types with richer metadata
+
 ## [0.0.3] - 2025-10-01
 
 ### Added

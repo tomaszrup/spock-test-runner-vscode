@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report.xsd" version="3.0.2" name="com.example.StepwiseSpec" time="0.001" tests="3" errors="0" skipped="0" failures="0">
+  <properties>
+    <property name="java.specification.version" value="21"/>
+    <property name="sun.cpu.isalist" value="amd64"/>
+    <property name="sun.jnu.encoding" value="Cp1250"/>
+    <property name="java.class.path" value="c:\Users\konta\Desktop\spock-test-runner-vscode-master\sample-maven-project\target\test-classes;c:\Users\konta\Desktop\spock-test-runner-vscode-master\sample-maven-project\target\classes;C:\Users\konta\.m2\repository\org\apache\groovy\groovy\4.0.15\groovy-4.0.15.jar;C:\Users\konta\.m2\repository\org\spockframework\spock-core\2.4-M1-groovy-4.0\spock-core-2.4-M1-groovy-4.0.jar;C:\Users\konta\.m2\repository\org\junit\platform\junit-platform-engine\1.11.4\junit-platform-engine-1.11.4.jar;C:\Users\konta\.m2\repository\org\opentest4j\opentest4j\1.3.0\opentest4j-1.3.0.jar;C:\Users\konta\.m2\repository\org\junit\platform\junit-platform-commons\1.11.4\junit-platform-commons-1.11.4.jar;C:\Users\konta\.m2\repository\org\hamcrest\hamcrest\2.2\hamcrest-2.2.jar;C:\Users\konta\.m2\repository\org\junit\jupiter\junit-jupiter-engine\5.11.4\junit-jupiter-engine-5.11.4.jar;C:\Users\konta\.m2\repository\org\junit\jupiter\junit-jupiter-api\5.11.4\junit-jupiter-api-5.11.4.jar;C:\Users\konta\.m2\repository\org\apiguardian\apiguardian-api\1.1.2\apiguardian-api-1.1.2.jar;C:\Users\konta\.m2\repository\org\junit\platform\junit-platform-launcher\1.11.4\junit-platform-launcher-1.11.4.jar;"/>
+    <property name="java.vm.vendor" value="Oracle Corporation"/>
+    <property name="sun.arch.data.model" value="64"/>
+    <property name="user.variant" value=""/>
+    <property name="java.vendor.url" value="https://java.oracle.com/"/>
+    <property name="user.timezone" value="Europe/Warsaw"/>
+    <property name="os.name" value="Windows 11"/>
+    <property name="java.vm.specification.version" value="21"/>
+    <property name="sun.java.launcher" value="SUN_STANDARD"/>
+    <property name="user.country" value="PL"/>
+    <property name="sun.boot.library.path" value="D:\jdk-21.0.2\bin"/>
+    <property name="sun.java.command" value="C:\Users\konta\AppData\Local\Temp\surefire16433092755856226357\surefirebooter-20260208020145032_3.jar C:\Users\konta\AppData\Local\Temp\surefire16433092755856226357 2026-02-08T02-01-44_865-jvmRun1 surefire-20260208020145032_1tmp surefire_0-20260208020145032_2tmp"/>
+    <property name="jdk.debug" value="release"/>
+    <property name="test" value="InheritedSpec#should run test from inherited base+should discover inherited spec,MalformedSpec#test with edge case data+test with nested structures+test with complex syntax+test with minimal where block,NestedClassSpec#another inner test+inner test method+outer test method,StepwiseSpec#step 3 - verify+step 2 - action+step 1 - setup,UserServiceSpec#should return null for non-existent user+should find user by id+should throw exception for empty name+should throw exception for invalid email+should create user with valid data,AnnotationSpec#this is also ignored because of @IgnoreRest+this is ignored because of @IgnoreRest above+only this test runs in the class+requires Java 8.+only on non-Windows+test with timeout+pending feature expected to fail+this test is ignored with reason+this test is ignored,CalculatorSpec#should handle multiple operations+should throw exception when dividing by zero+should divide two numbers correctly+should multiply two numbers correctly+should subtract two numbers correctly+should add two numbers correctly,ComplexDataSpec#should handle step range+should handle range data+should handle multiple data sources+complex scoring scenarios+should handle frame analysis+should handle game state transitions+should handle complex game scenarios,DataDrivenSpec#should validate user data+should multiply numbers+addition test+should validate ranges+should combine data from multiple sources+should validate even numbers+should calculate area+should validate email format+maximum of #a and #b is #c+should validate positive numbers+should handle multiple operations+should add numbers correctly+should calculate square of number+maximum of two numbers,DeliberateFailureSpec#old-value expression fails+verifyAll reports multiple failures at once+with block assertion fails+pending feature that still fails+this test is skipped+type coercion fails at runtime+another passing test for contrast+this test deliberately passes+mock expected more invocations than occurred+mock interaction verification fails+given-when-then block with then failing+data-driven all-fail: #input squared is #expected+data-driven: #a . #b should equal #expected+multiple conditions with first failing+empty collection is not truthy+null value fails assertion+exception message does not match+wrong exception type is thrown+expected exception is not thrown+map comparison fails+list comparison fails+string comparison fails with diff+boolean condition fails+simple equality fails,IgnoredClassSpec#test two in ignored class+test one in ignored class,FrameSpec#should display frame correctly+should handle frame equality+should validate roll constraints - invalid rolls+should validate roll constraints - valid rolls+should handle last frame with strike+should handle two rolls+should handle single roll+should create empty frame,BowlingGameSpec#should handle edge cases - invalid rolls+should handle edge cases - valid rolls+should validate game state transitions+frame scoring test+should handle last frame scenarios+should calculate complex scoring+should handle consecutive strikes+should handle frame completion+should validate roll constraints - invalid pins+should validate roll constraints - valid pins+#gameState should have score #expectedScore+strike in frame #frame should give bonus points+should handle gutter game+should handle mixed frame types+should handle spares correctly+should calculate score for regular frames"/>
+    <property name="surefire.test.class.path" value="c:\Users\konta\Desktop\spock-test-runner-vscode-master\sample-maven-project\target\test-classes;c:\Users\konta\Desktop\spock-test-runner-vscode-master\sample-maven-project\target\classes;C:\Users\konta\.m2\repository\org\apache\groovy\groovy\4.0.15\groovy-4.0.15.jar;C:\Users\konta\.m2\repository\org\spockframework\spock-core\2.4-M1-groovy-4.0\spock-core-2.4-M1-groovy-4.0.jar;C:\Users\konta\.m2\repository\org\junit\platform\junit-platform-engine\1.11.4\junit-platform-engine-1.11.4.jar;C:\Users\konta\.m2\repository\org\opentest4j\opentest4j\1.3.0\opentest4j-1.3.0.jar;C:\Users\konta\.m2\repository\org\junit\platform\junit-platform-commons\1.11.4\junit-platform-commons-1.11.4.jar;C:\Users\konta\.m2\repository\org\hamcrest\hamcrest\2.2\hamcrest-2.2.jar;C:\Users\konta\.m2\repository\org\junit\jupiter\junit-jupiter-engine\5.11.4\junit-jupiter-engine-5.11.4.jar;C:\Users\konta\.m2\repository\org\junit\jupiter\junit-jupiter-api\5.11.4\junit-jupiter-api-5.11.4.jar;C:\Users\konta\.m2\repository\org\apiguardian\apiguardian-api\1.1.2\apiguardian-api-1.1.2.jar;C:\Users\konta\.m2\repository\org\junit\platform\junit-platform-launcher\1.11.4\junit-platform-launcher-1.11.4.jar;"/>
+    <property name="sun.cpu.endian" value="little"/>
+    <property name="user.home" value="C:\Users\konta"/>
+    <property name="user.language" value="pl"/>
+    <property name="java.specification.vendor" value="Oracle Corporation"/>
+    <property name="surefire.useFile" value="true"/>
+    <property name="java.version.date" value="2024-01-16"/>
+    <property name="java.home" value="D:\jdk-21.0.2"/>
+    <property name="file.separator" value="\"/>
+    <property name="basedir" value="c:\Users\konta\Desktop\spock-test-runner-vscode-master\sample-maven-project"/>
+    <property name="java.vm.compressedOopsMode" value="Zero based"/>
+    <property name="line.separator" value="&#10;"/>
+    <property name="java.vm.specification.vendor" value="Oracle Corporation"/>
+    <property name="java.specification.name" value="Java Platform API Specification"/>
+    <property name="surefire.real.class.path" value="C:\Users\konta\AppData\Local\Temp\surefire16433092755856226357\surefirebooter-20260208020145032_3.jar"/>
+    <property name="user.script" value=""/>
+    <property name="sun.management.compiler" value="HotSpot 64-Bit Tiered Compilers"/>
+    <property name="java.runtime.version" value="21.0.2+13-58"/>
+    <property name="user.name" value="konta"/>
+    <property name="stdout.encoding" value="Cp1250"/>
+    <property name="path.separator" value=";"/>
+    <property name="os.version" value="10.0"/>
+    <property name="java.runtime.name" value="OpenJDK Runtime Environment"/>
+    <property name="file.encoding" value="UTF-8"/>
+    <property name="surefire.failIfNoSpecifiedTests" value="false"/>
+    <property name="java.vm.name" value="OpenJDK 64-Bit Server VM"/>
+    <property name="localRepository" value="C:\Users\konta\.m2\repository"/>
+    <property name="java.vendor.url.bug" value="https://bugreport.java.com/bugreport/"/>
+    <property name="java.io.tmpdir" value="C:\Users\konta\AppData\Local\Temp\"/>
+    <property name="java.version" value="21.0.2"/>
+    <property name="user.dir" value="c:\Users\konta\Desktop\spock-test-runner-vscode-master\sample-maven-project"/>
+    <property name="os.arch" value="amd64"/>
+    <property name="java.vm.specification.name" value="Java Virtual Machine Specification"/>
+    <property name="sun.os.patch.level" value=""/>
+    <property name="native.encoding" value="Cp1250"/>
+    <property name="java.library.path" value="D:\jdk-21.0.2\bin;C:\WINDOWS\Sun\Java\bin;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Program Files\dotnet\;D:\nodejs\;C:\Users\konta\.config\herd\bin\nvm;C:\Program Files\nodejs;C:\Program Files\Git\cmd;C:\Users\konta\.config\herd\bin;C:\Users\konta\.config\herd-lite\bin;C:\Users\konta\AppData\Local\Microsoft\WindowsApps;D:\Microsoft VS Code\bin;C:\Users\konta\AppData\Roaming\npm;D:\jdk-21.0.2\bin;;."/>
+    <property name="java.vm.info" value="mixed mode, sharing"/>
+    <property name="stderr.encoding" value="Cp1250"/>
+    <property name="java.vendor" value="Oracle Corporation"/>
+    <property name="java.vm.version" value="21.0.2+13-58"/>
+    <property name="sun.io.unicode.encoding" value="UnicodeLittle"/>
+    <property name="java.class.version" value="65.0"/>
+  </properties>
+  <testcase name="step 1 - setup" classname="com.example.StepwiseSpec" time="0.001"/>
+  <testcase name="step 2 - action" classname="com.example.StepwiseSpec" time="0.0"/>
+  <testcase name="step 3 - verify" classname="com.example.StepwiseSpec" time="0.0"/>
+</testsuite>

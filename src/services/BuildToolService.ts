@@ -7,14 +7,46 @@ import { ConfigurationService } from './ConfigurationService';
 export class BuildToolService {
   /**
    * Detect the build tool at a given directory path.
-   * Supports build.gradle (Groovy DSL) and build.gradle.kts (Kotlin DSL).
+   * Supports Gradle (build.gradle / build.gradle.kts) and Maven (pom.xml).
+   * Gradle is checked first for backward compatibility.
    */
   static detectBuildTool(workspacePath: string): BuildTool | null {
     if (this.isGradleProject(workspacePath)) {
       return 'gradle';
     }
+    if (this.isMavenProject(workspacePath)) {
+      return 'maven';
+    }
     return null;
   }
+
+  // ── Generic project detection ──────────────────────────────────────
+
+  /**
+   * Find the nearest project root (Gradle or Maven) by walking up from a file path.
+   * Checks Gradle first, then Maven, stopping at the workspace root boundary.
+   */
+  static findProjectRoot(filePath: string, workspaceRoot: string): string | null {
+    return this.findGradleProjectRoot(filePath, workspaceRoot)
+        || this.findMavenProjectRoot(filePath, workspaceRoot);
+  }
+
+  /**
+   * Find the root project (Gradle settings or Maven parent pom) by walking up
+   * from a (sub)project directory.  Delegates to the appropriate build-tool
+   * method based on what is detected at {@link projectPath}.
+   */
+  static findRootProject(projectPath: string, workspaceRoot: string): string {
+    if (this.isGradleProject(projectPath)) {
+      return this.findGradleRootProject(projectPath, workspaceRoot);
+    }
+    if (this.isMavenProject(projectPath)) {
+      return this.findMavenRootProject(projectPath, workspaceRoot);
+    }
+    return projectPath;
+  }
+
+  // ── Gradle-specific ────────────────────────────────────────────────
 
   /**
    * Find the nearest Gradle project root by walking up from a file path.
@@ -130,7 +162,162 @@ export class BuildToolService {
     return `:${gradlePath}`;
   }
 
+  /**
+   * Check if a Gradle wrapper exists at the given path or in any parent directory.
+   * This supports multi-level projects where gradlew is at the root project level.
+   */
+  static hasGradleWrapper(workspacePath: string): boolean {
+    let currentDir = workspacePath;
+    
+    while (true) {
+      if (fs.existsSync(path.join(currentDir, 'gradlew')) ||
+          fs.existsSync(path.join(currentDir, 'gradlew.bat'))) {
+        return true;
+      }
+      
+      const parentDir = path.dirname(currentDir);
+      if (parentDir === currentDir) {
+        break; // Filesystem root
+      }
+      currentDir = parentDir;
+    }
+    
+    return false;
+  }
+
+  // ── Maven-specific ─────────────────────────────────────────────────
+
+  /**
+   * Check if a directory contains a Maven pom.xml.
+   */
+  static isMavenProject(dir: string): boolean {
+    return fs.existsSync(path.join(dir, 'pom.xml'));
+  }
+
+  /**
+   * Find the nearest Maven project root by walking up from a file path.
+   * Searches for pom.xml in each parent directory, stopping at the
+   * workspace root boundary.
+   */
+  static findMavenProjectRoot(filePath: string, workspaceRoot: string): string | null {
+    let currentDir: string;
+    try {
+      const stat = fs.statSync(filePath);
+      currentDir = stat.isDirectory() ? filePath : path.dirname(filePath);
+    } catch {
+      currentDir = path.dirname(filePath);
+    }
+
+    const normalizedRoot = path.resolve(workspaceRoot);
+
+    while (true) {
+      const normalizedCurrent = path.resolve(currentDir);
+
+      if (this.isMavenProject(currentDir)) {
+        return currentDir;
+      }
+
+      if (normalizedCurrent === normalizedRoot) {
+        break;
+      }
+
+      const parentDir = path.dirname(currentDir);
+      if (parentDir === currentDir) {
+        break;
+      }
+
+      currentDir = parentDir;
+    }
+
+    return null;
+  }
+
+  /**
+   * Find the Maven root project by walking up from a (sub)module directory.
+   * A root project is identified as the highest pom.xml that contains
+   * a {@code <modules>} section (multi-module reactor) within the workspace
+   * boundary.  If no such parent is found the original path is returned.
+   */
+  static findMavenRootProject(projectPath: string, workspaceRoot: string): string {
+    let currentDir = projectPath;
+    const normalizedRoot = path.resolve(workspaceRoot);
+    let bestCandidate = projectPath;
+
+    while (true) {
+      const normalizedCurrent = path.resolve(currentDir);
+
+      if (this.isMavenProject(currentDir)) {
+        try {
+          const pomContent = fs.readFileSync(path.join(currentDir, 'pom.xml'), 'utf8');
+          if (/<modules\s*>/.test(pomContent)) {
+            bestCandidate = currentDir;
+          }
+        } catch {
+          // Ignore read errors
+        }
+      }
+
+      if (normalizedCurrent === normalizedRoot) {
+        break;
+      }
+
+      const parentDir = path.dirname(currentDir);
+      if (parentDir === currentDir) {
+        break;
+      }
+      currentDir = parentDir;
+    }
+
+    return bestCandidate;
+  }
+
+  /**
+   * Compute the Maven module argument(s) for a sub-module directory
+   * relative to the root project.  Returns an empty string when the
+   * sub-module IS the root project.
+   *
+   * Example: root="/ws", sub="/ws/moduleA"       → "moduleA"
+   * Example: root="/ws", sub="/ws/parent/child"   → "parent/child"
+   */
+  static getMavenModuleName(rootProject: string, submodulePath: string): string {
+    const normalizedRoot = path.resolve(rootProject);
+    const normalizedSub  = path.resolve(submodulePath);
+
+    if (normalizedRoot === normalizedSub) {
+      return '';
+    }
+
+    const relativePath = path.relative(normalizedRoot, normalizedSub);
+    // Maven uses forward slash for module path regardless of OS
+    return relativePath.split(path.sep).join('/');
+  }
+
+  /**
+   * Check if a Maven wrapper exists at the given path or in any parent directory.
+   */
+  static hasMavenWrapper(workspacePath: string): boolean {
+    let currentDir = workspacePath;
+
+    while (true) {
+      if (fs.existsSync(path.join(currentDir, 'mvnw')) ||
+          fs.existsSync(path.join(currentDir, 'mvnw.cmd'))) {
+        return true;
+      }
+
+      const parentDir = path.dirname(currentDir);
+      if (parentDir === currentDir) {
+        break;
+      }
+      currentDir = parentDir;
+    }
+
+    return false;
+  }
+
+  // ── Project name ───────────────────────────────────────────────────
+
   static getProjectName(workspacePath: string): string {
+    // Try Gradle first
     try {
       const gradlePath = path.join(workspacePath, 'build.gradle');
       const ktsPath = path.join(workspacePath, 'build.gradle.kts');
@@ -144,23 +331,78 @@ export class BuildToolService {
               return nameMatch[1];
             }
         }
-        
     } catch (error) {
-      // Fallback to workspace folder name
+      // Fallback below
     }
     
+    // Try Maven
+    try {
+      const pomPath = path.join(workspacePath, 'pom.xml');
+      if (fs.existsSync(pomPath)) {
+        const pomContent = fs.readFileSync(pomPath, 'utf8');
+        // Match <name>...</name> that is NOT inside <parent>
+        const nameMatch = pomContent.match(/<name>([^<]+)<\/name>/);
+        if (nameMatch) {
+          return nameMatch[1].trim();
+        }
+        // Fallback to artifactId
+        const artifactMatch = pomContent.match(/<artifactId>([^<]+)<\/artifactId>/);
+        if (artifactMatch) {
+          return artifactMatch[1].trim();
+        }
+      }
+    } catch (error) {
+      // Fallback below
+    }
+
     return path.basename(workspacePath);
   }
+
+  // ── Command building ───────────────────────────────────────────────
 
   static buildCommandArgs(
     testName: string, 
     debug: boolean, 
     workspacePath?: string,
     logger?: vscode.OutputChannel,
+    subprojectPrefix?: string,
+    buildTool?: BuildTool
+  ): string[] {
+    const detectedTool = buildTool || (workspacePath ? this.detectBuildTool(workspacePath) : null) || 'gradle';
+
+    if (detectedTool === 'maven') {
+      return this.buildMavenCommandArgs(testName, debug, workspacePath, logger, subprojectPrefix);
+    }
+    return this.buildGradleCommandArgs(testName, debug, workspacePath, logger, subprojectPrefix);
+  }
+
+  static buildBatchCommandArgs(
+    testFilters: string[],
+    debug: boolean,
+    workspacePath?: string,
+    logger?: vscode.OutputChannel,
+    subprojectPrefix?: string,
+    coverage: boolean = false,
+    buildTool?: BuildTool
+  ): string[] {
+    const detectedTool = buildTool || (workspacePath ? this.detectBuildTool(workspacePath) : null) || 'gradle';
+
+    if (detectedTool === 'maven') {
+      return this.buildMavenBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage);
+    }
+    return this.buildGradleBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage);
+  }
+
+  // ── Gradle command building ────────────────────────────────────────
+
+  private static buildGradleCommandArgs(
+    testName: string,
+    debug: boolean,
+    workspacePath?: string,
+    logger?: vscode.OutputChannel,
     subprojectPrefix?: string
   ): string[] {
     const isWindows = process.platform === 'win32';
-    // On Windows with shell: true, arguments with spaces must be quoted
     const quote = (s: string) => isWindows && s.includes(' ') ? `"${s}"` : s;
 
     const escapedTestName = quote(testName);
@@ -174,11 +416,9 @@ export class BuildToolService {
     const taskName = subprojectPrefix ? `${subprojectPrefix}:test` : 'test';
     const baseArgs = [gradleCommand, taskName, '--tests', escapedTestName, '--stacktrace'];
     
-    // Use init script to force test execution
     const initScriptPath = quote(this.getInitScriptPath());
     const initScriptArgs = ['--init-script', initScriptPath];
     
-    // Log the force execution approach
     if (logger) {
       logger.appendLine(`BuildToolService: Using Gradle init script to force test execution (--init-script)`);
     }
@@ -192,7 +432,7 @@ export class BuildToolService {
     }
   }
 
-  static buildBatchCommandArgs(
+  private static buildGradleBatchCommandArgs(
     testFilters: string[],
     debug: boolean,
     workspacePath?: string,
@@ -237,11 +477,199 @@ export class BuildToolService {
     return args;
   }
 
+  // ── Maven command building ─────────────────────────────────────────
+
+  /**
+   * Build Maven command args for running a single test.
+   * Uses Surefire's {@code -Dtest} filter.
+   *
+   * @param testName  Fully qualified "ClassName.methodName"
+   */
+  private static buildMavenCommandArgs(
+    testName: string,
+    debug: boolean,
+    workspacePath?: string,
+    logger?: vscode.OutputChannel,
+    mavenModuleName?: string
+  ): string[] {
+    const isWindows = process.platform === 'win32';
+    const quote = (s: string) => isWindows && s.includes(' ') ? `"${s}"` : s;
+
+    const mvnCommand = this.getMavenCommand(workspacePath);
+
+    // Convert "ClassName.methodName" to Surefire filter "ClassName#methodName"
+    const surefireFilter = this.toSurefireFilter(testName);
+
+    const args = [mvnCommand, 'test', `-Dtest=${quote(surefireFilter)}`, '-Dsurefire.useFile=true',
+      '-Dsurefire.failIfNoSpecifiedTests=false'];
+
+    // For multi-module: run only in the target module
+    if (mavenModuleName) {
+      args.push('-pl', mavenModuleName, '-am');
+    }
+
+    if (debug) {
+      const cfg = ConfigurationService.getConfig();
+      args.push(`-Dmaven.surefire.debug=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${cfg.debugPort}`);
+    }
+
+    if (logger) {
+      logger.appendLine(`BuildToolService: Using Maven Surefire to execute test`);
+    }
+
+    const extraArgs = ConfigurationService.getConfig().additionalMavenArgs;
+    args.push(...extraArgs);
+
+    return args;
+  }
+
+  /**
+   * Build Maven command args for running a batch of tests.
+   */
+  private static buildMavenBatchCommandArgs(
+    testFilters: string[],
+    debug: boolean,
+    workspacePath?: string,
+    logger?: vscode.OutputChannel,
+    mavenModuleName?: string,
+    coverage: boolean = false
+  ): string[] {
+    const isWindows = process.platform === 'win32';
+    const quote = (s: string) => isWindows && s.includes(' ') ? `"${s}"` : s;
+
+    const mvnCommand = this.getMavenCommand(workspacePath);
+
+    // Group filters by class for Surefire: "Class1#m1+m2,Class2#m3"
+    const surefireFilter = this.buildSurefireBatchFilter(testFilters);
+
+    const args = [mvnCommand, 'test', `-Dtest=${quote(surefireFilter)}`, '-Dsurefire.useFile=true',
+      '-Dsurefire.failIfNoSpecifiedTests=false'];
+
+    if (mavenModuleName) {
+      args.push('-pl', mavenModuleName, '-am');
+    }
+
+    if (coverage) {
+      // Use JaCoCo Maven plugin goals inline (works without pom.xml configuration)
+      args.splice(1, 0, 'org.jacoco:jacoco-maven-plugin:prepare-agent');
+      args.push('org.jacoco:jacoco-maven-plugin:report');
+    }
+
+    if (debug) {
+      const cfg = ConfigurationService.getConfig();
+      args.push(`-Dmaven.surefire.debug=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${cfg.debugPort}`);
+    }
+
+    if (logger) {
+      logger.appendLine(`BuildToolService: Maven batch execution with ${testFilters.length} test filter(s)${coverage ? ' (with coverage)' : ''}`);
+    }
+
+    const extraArgs = ConfigurationService.getConfig().additionalMavenArgs;
+    args.push(...extraArgs);
+
+    return args;
+  }
+
+  /**
+   * Get the Maven command, preferring the wrapper if available.
+   */
+  private static getMavenCommand(workspacePath?: string): string {
+    const isWindows = process.platform === 'win32';
+    if (workspacePath && this.hasMavenWrapper(workspacePath)) {
+      return isWindows ? 'mvnw.cmd' : './mvnw';
+    }
+    return 'mvn';
+  }
+
+  /**
+   * Convert a Gradle-style test filter ("ClassName.methodName") to
+   * Surefire's format ("ClassName#methodName").
+   */
+  static toSurefireFilter(testName: string): string {
+    // "com.example.MySpec.test name" → "com.example.MySpec#test name"
+    // The last dot before a lowercase/space segment separates class from method
+    const lastDot = testName.lastIndexOf('.');
+    if (lastDot > 0) {
+      const className = testName.substring(0, lastDot);
+      const methodName = testName.substring(lastDot + 1);
+      return className + '#' + this.escapeMethodForSurefire(methodName);
+    }
+    return testName;
+  }
+
+  /**
+   * Build a combined Surefire -Dtest filter for multiple tests.
+   * Groups methods by class: "Class1#m1+m2,Class2#m3"
+   *
+   * Method names are escaped via {@link escapeMethodForSurefire} so that
+   * characters with structural meaning in Surefire (`+`, `,`) don't break
+   * the filter syntax.
+   */
+  static buildSurefireBatchFilter(testFilters: string[]): string {
+    const classMap = new Map<string, string[]>();
+    for (const filter of testFilters) {
+      const lastDot = filter.lastIndexOf('.');
+      if (lastDot > 0) {
+        const className = filter.substring(0, lastDot);
+        const methodName = filter.substring(lastDot + 1);
+        if (!classMap.has(className)) {
+          classMap.set(className, []);
+        }
+        classMap.get(className)!.push(this.escapeMethodForSurefire(methodName));
+      } else {
+        // No dot — treat as class-only filter
+        if (!classMap.has(filter)) {
+          classMap.set(filter, []);
+        }
+      }
+    }
+
+    const parts: string[] = [];
+    for (const [className, methods] of classMap) {
+      if (methods.length === 0) {
+        parts.push(className);
+      } else {
+        parts.push(`${className}#${methods.join('+')}`);
+      }
+    }
+
+    return parts.join(',');
+  }
+
+  /**
+   * Escape a Spock method/display name for use in Surefire's `-Dtest` filter.
+   *
+   * Surefire uses structural separators that cannot be escaped:
+   *   `+`  — separates method names within a class
+   *   `,`  — separates class entries
+   *
+   * After splitting on those separators, each method pattern is treated as a
+   * regex.  We therefore:
+   *   1. Replace `+` and `,` with regex-any-char (`.`).
+   *   2. Escape other regex-special characters so the rest matches literally.
+   */
+  static escapeMethodForSurefire(methodName: string): string {
+    // Step 1: Replace Surefire structural separators with unique placeholders
+    let result = methodName
+      .replace(/\+/g, '\x00P')
+      .replace(/,/g, '\x00C');
+
+    // Step 2: Escape regex-special characters (NOT + and , — already replaced)
+    result = result.replace(/[.*?()\[\]{}^$|\\]/g, '\\$&');
+
+    // Step 3: Replace placeholders with '.' (regex any-char)
+    result = result
+      .replace(/\x00P/g, '.')
+      .replace(/\x00C/g, '.');
+
+    return result;
+  }
+
+  // ── Shared / init scripts ──────────────────────────────────────────
+
   private static getInitScriptPath(): string {
-    // Get the path to the init script relative to the extension
     const initScriptPath = path.join(__dirname, '..', '..', 'resources', 'force-tests.init.gradle');
     
-    // Verify the init script exists
     if (!fs.existsSync(initScriptPath)) {
       throw new Error(`Init script not found at: ${initScriptPath}`);
     }           
@@ -261,25 +689,14 @@ export class BuildToolService {
   }
 
   /**
-   * Check if a Gradle wrapper exists at the given path or in any parent directory.
-   * This supports multi-level projects where gradlew is at the root project level.
+   * Return the directory where JUnit XML test reports are written.
+   * Gradle: build/test-results/test
+   * Maven:  target/surefire-reports
    */
-  static hasGradleWrapper(workspacePath: string): boolean {
-    let currentDir = workspacePath;
-    
-    while (true) {
-      if (fs.existsSync(path.join(currentDir, 'gradlew')) ||
-          fs.existsSync(path.join(currentDir, 'gradlew.bat'))) {
-        return true;
-      }
-      
-      const parentDir = path.dirname(currentDir);
-      if (parentDir === currentDir) {
-        break; // Filesystem root
-      }
-      currentDir = parentDir;
+  static getTestResultsDir(projectRoot: string, buildTool: BuildTool): string {
+    if (buildTool === 'maven') {
+      return path.join(projectRoot, 'target', 'surefire-reports');
     }
-    
-    return false;
+    return path.join(projectRoot, 'build', 'test-results', 'test');
   }
 }

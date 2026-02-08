@@ -1,7 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { DiffInfo, TestIterationResult } from '../types';
+import { BuildTool, DiffInfo, TestIterationResult } from '../types';
+import { BuildToolService } from './BuildToolService';
 
 export class TestResultParser {
   private logger: vscode.OutputChannel;
@@ -109,9 +110,9 @@ export class TestResultParser {
   /**
    * Parse XML test report to extract iteration results
    */
-  async parseXmlReport(workspacePath: string, className: string): Promise<TestIterationResult[]> {
+  async parseXmlReport(workspacePath: string, className: string, buildTool: BuildTool = 'gradle'): Promise<TestIterationResult[]> {
     const results: TestIterationResult[] = [];
-    const testResultsDir = path.join(workspacePath, 'build', 'test-results', 'test');
+    const testResultsDir = BuildToolService.getTestResultsDir(workspacePath, buildTool);
 
     try {
       if (!fs.existsSync(testResultsDir)) {
@@ -229,8 +230,8 @@ export class TestResultParser {
    * Parse XML report to get pass/fail results for all tests in a class.
    * Returns a map from test name to result.
    */
-  async parseClassTestResults(workspacePath: string, className: string): Promise<Map<string, {success: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}>> {
-    const testResultsDir = path.join(workspacePath, 'build', 'test-results', 'test');
+  async parseClassTestResults(workspacePath: string, className: string, buildTool: BuildTool = 'gradle'): Promise<Map<string, {success: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}>> {
+    const testResultsDir = BuildToolService.getTestResultsDir(workspacePath, buildTool);
 
     try {
       if (!fs.existsSync(testResultsDir)) {
@@ -360,43 +361,85 @@ export class TestResultParser {
       return undefined;
     }
 
+    // Don't attempt diff extraction for exception-based failures.
+    // These contain "thrown()" expectations, explicit throw keywords, or are
+    // dominated by stack traces rather than value comparisons.
+    if (this.isExceptionError(errorMessage)) {
+      return undefined;
+    }
+
     // Pattern 1: "Expected :X" / "Actual   :Y" (IntelliJ / ComparisonFailure style)
     const expectedActualBlock = errorMessage.match(/Expected\s*:\s*(.*)\nActual\s*:\s*(.*)/i);
     if (expectedActualBlock) {
-      return { expected: expectedActualBlock[1].trim(), actual: expectedActualBlock[2].trim() };
+      const expected = expectedActualBlock[1].trim();
+      const actual = expectedActualBlock[2].trim();
+      if (expected !== actual) {
+        return { expected, actual };
+      }
     }
 
     // Pattern 2: "expected: <X> but was: <Y>" (JUnit angle-bracket style)
     const junitAngle = errorMessage.match(/expected:\s*<(.+?)>\s*but was:\s*<(.+?)>/i);
     if (junitAngle) {
-      return { expected: junitAngle[1], actual: junitAngle[2] };
+      if (junitAngle[1] !== junitAngle[2]) {
+        return { expected: junitAngle[1], actual: junitAngle[2] };
+      }
     }
 
     // Pattern 3: "expected: X but was: Y" (Spock / Groovy style, possibly quoted)
     const junitPlain = errorMessage.match(/expected:\s*(.+?)\s+but was:\s*(.+?)(?:\s*$|\n)/im);
     if (junitPlain) {
-      return { expected: junitPlain[1].trim(), actual: junitPlain[2].trim() };
+      const expected = junitPlain[1].trim();
+      const actual = junitPlain[2].trim();
+      if (expected !== actual) {
+        return { expected, actual };
+      }
     }
 
     // Pattern 4: Spock power assertion block
-    // Look for "Condition not satisfied:" followed by an expression containing ==
+    // Only match when preceded by "Condition not satisfied:" — this is the reliable
+    // indicator that an equality assertion failed with a power-assert display.
+    // Capture the leading indent so we can align columns between expression and value lines.
     const conditionBlock = errorMessage.match(
-      /Condition not satisfied:\s*\n\s*(.+?==.+?)\n([\s\S]*?)(?:\n\s*$|\nat\s)/
+      /Condition not satisfied:\s*\n(\s*)(.+==.+)\n((?:[ \t|]*\S.*\n?)+)/
     );
     if (conditionBlock) {
-      return this.parseSpockPowerAssertion(conditionBlock[1], conditionBlock[2]);
-    }
-
-    // Pattern 4b: Same but without "Condition not satisfied:" preamble
-    // Sometimes the message starts directly with the expression
-    const directAssertion = errorMessage.match(
-      /^[ \t]*(.+?==.+?)\n((?:[ \t]*[|^\s].*\n?)+)/m
-    );
-    if (directAssertion) {
-      return this.parseSpockPowerAssertion(directAssertion[1], directAssertion[2]);
+      const indent = conditionBlock[1].length;
+      const result = this.parseSpockPowerAssertion(conditionBlock[2], conditionBlock[3], indent);
+      if (result) {
+        return result;
+      }
     }
 
     return undefined;
+  }
+
+  /**
+   * Detect whether an error message represents an exception-based failure rather
+   * than a value comparison. Exception failures should not be shown as diffs.
+   */
+  private isExceptionError(errorMessage: string): boolean {
+    // Thrown/expected exception patterns
+    if (/\bthrown\(\)/.test(errorMessage)) { return true; }
+    if (/\bnoExceptionThrown\(\)/.test(errorMessage)) { return true; }
+    if (/Expected exception of type/.test(errorMessage)) { return true; }
+    if (/Expected no exception/.test(errorMessage)) { return true; }
+
+    // If the message is mostly stack trace lines, it's an exception
+    const lines = errorMessage.split('\n');
+    const stackLines = lines.filter(l => /^\s*at\s+/.test(l));
+    if (stackLines.length > lines.length * 0.4 && stackLines.length > 3) { return true; }
+
+    // Common exception class names as the primary content
+    if (/^\s*(java\.\w+\.|groovy\.\w+\.|org\.[\w.]+)(Exception|Error|Throwable)/m.test(errorMessage)) {
+      // Only if there is no "Condition not satisfied:" block — some exceptions
+      // are surfaced inside condition blocks and those are legitimate.
+      if (!/Condition not satisfied:/.test(errorMessage)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -404,35 +447,46 @@ export class TestResultParser {
    * The expression line contains "lhs == rhs" and the value lines show resolved values
    * underneath each sub-expression, aligned by column position.
    *
-   * Example:
-   *   game.score() == expectedScore    ← expressionLine
-   *   |    |       |  |                ← pointer lines
+   * @param indent number of leading whitespace chars stripped from expressionLine
+   *               (needed to align with value-block columns that retain indentation)
+   *
+   * Example (indent=2):
+   *   game.score() == expectedScore    ← expressionLine (captured without the 2 leading spaces)
+   *   |    |       |  |                ← pointer lines  (columns are absolute, include the 2 spaces)
    *   |    6       |  7                ← value lines
    *   |            false
    *   Game@abc
    */
-  private parseSpockPowerAssertion(expressionLine: string, valueBlock: string): DiffInfo | undefined {
+  private parseSpockPowerAssertion(expressionLine: string, valueBlock: string, indent: number = 0): DiffInfo | undefined {
     const eqIndex = expressionLine.indexOf('==');
     if (eqIndex === -1) {
       return undefined;
     }
 
-    // The LHS expression ends just before == and RHS starts just after ==
-    const lhsExpr = expressionLine.substring(0, eqIndex).trimEnd();
-    const rhsExpr = expressionLine.substring(eqIndex + 2).trimStart();
-
-    // The value block has lines like:
-    //   |    6       |  7
-    //   |            false
-    // Values are positioned at the same column as their sub-expression in the expression line.
-    // We need to find the resolved value nearest to the LHS end and RHS start.
+    // The absolute column of == in the original output (accounting for stripped indent)
+    const eqCol = eqIndex + indent;
 
     const valueLines = valueBlock.split('\n');
 
-    // Collect all (column, value) pairs from the value lines
+    // Collect all (column, value) pairs from the value lines,
+    // but skip the "false" / "true" token sitting directly under the == operator
+    // (that's the comparison result, not a data value).
+    // Also skip Spock's similarity analysis lines (e.g. "1 difference (83% similarity)")
+    // which appear after the power assertion values and pollute token extraction.
     const values: Array<{ col: number; value: string }> = [];
+    let inSimilarityBlock = false;
     for (const vLine of valueLines) {
-      // Find non-pipe, non-whitespace tokens and their column positions
+      // Once we hit the similarity analysis block, skip all remaining lines
+      if (inSimilarityBlock) { continue; }
+      // Detect start of Spock's similarity analysis (e.g. "1 difference (83% similarity)")
+      if (/^\s*\d+\s+difference/.test(vLine)) { inSimilarityBlock = true; continue; }
+      // Skip lines that look like stack traces
+      if (/^\s*at\s+/.test(vLine)) { continue; }
+      // Skip Groovy/Java object representation lines (toString() dumps).
+      // These look like: <com.example.ClassName@hexhash prop=val ...>
+      // Their internal tokens (e.g. "frames=[[3,") would pollute value extraction.
+      if (/^\s*<?[a-zA-Z_][\w.]*@[0-9a-fA-F]+/.test(vLine)) { continue; }
+
       let i = 0;
       while (i < vLine.length) {
         if (vLine[i] === '|' || vLine[i] === ' ') {
@@ -441,29 +495,39 @@ export class TestResultParser {
         }
         // Found start of a value token
         const start = i;
-        while (i < vLine.length && vLine[i] !== '|' && !(vLine[i] === ' ' && i > start)) {
-          // Allow spaces inside values like "false" or complex strings, but stop at pipe
-          if (vLine[i] === ' ') {
-            // Peek ahead: if next non-space is a pipe or end, this space is trailing
-            let j = i;
-            while (j < vLine.length && vLine[j] === ' ') { j++; }
-            if (j >= vLine.length || vLine[j] === '|') { break; }
-            // Otherwise the space is part of a multi-word value — but for Spock
-            // values are typically single tokens, so break conservatively
-            break;
+        if (vLine[start] === '[') {
+          // Bracket-enclosed value: track depth so we stop at the matching ']'
+          // instead of consuming content beyond the brackets.
+          let depth = 0;
+          while (i < vLine.length && vLine[i] !== '|') {
+            if (vLine[i] === '[') { depth++; }
+            else if (vLine[i] === ']') {
+              depth--;
+              if (depth === 0) { i++; break; }
+            }
+            i++;
           }
+        } else if (vLine[start] === '"' || vLine[start] === "'") {
+          // Quoted value: scan to closing quote
+          const quote = vLine[start];
           i++;
+          while (i < vLine.length && vLine[i] !== quote) { i++; }
+          if (i < vLine.length) { i++; }
+        } else {
+          // Regular value: stop at space or pipe
+          while (i < vLine.length && vLine[i] !== '|' && vLine[i] !== ' ') {
+            i++;
+          }
         }
         const token = vLine.substring(start, i).trim();
-        if (token && token !== 'false' && token !== 'true') {
-          // Skip 'false' from the == comparison result itself
-          values.push({ col: start, value: token });
-        } else if (token === 'true' || token === 'false') {
-          // 'false' at the == position is the comparison result, not a value
-          // But 'true'/'false' elsewhere is a real value
-          const eqCol = eqIndex;
-          if (Math.abs(start - eqCol) > 2) {
-            // Not near the == operator, treat as real value
+        if (token) {
+          // Skip the boolean comparison result directly under the == operator.
+          // Use absolute column comparison (start vs eqCol).
+          // Tolerance of 2 covers the width of "==" without catching RHS values
+          // that start just after the operator.
+          const isComparisonResult = (token === 'false' || token === 'true') &&
+            Math.abs(start - eqCol) <= 2;
+          if (!isComparisonResult) {
             values.push({ col: start, value: token });
           }
         }
@@ -475,37 +539,84 @@ export class TestResultParser {
       return undefined;
     }
 
-    // Find the value closest to the LHS expression (column < eqIndex)
-    // and the value closest to the RHS expression (column > eqIndex)
-    let lhsValue: string | undefined;
-    let rhsValue: string | undefined;
-    let lhsBestDist = Infinity;
-    let rhsBestDist = Infinity;
+    // Separate LHS (column < eqCol) and RHS (column > eqCol+2) candidates
+    const lhsCandidates: Array<{ col: number; value: string }> = [];
+    const rhsCandidates: Array<{ col: number; value: string }> = [];
 
     for (const v of values) {
-      if (v.col < eqIndex) {
-        // Candidate for LHS — prefer the one closest to (but before) ==
-        const dist = eqIndex - v.col;
-        if (dist < lhsBestDist) {
-          lhsBestDist = dist;
-          lhsValue = v.value;
-        }
-      } else if (v.col > eqIndex) {
-        // Candidate for RHS — prefer the one closest to (but after) ==
-        const dist = v.col - eqIndex;
-        if (dist < rhsBestDist) {
-          rhsBestDist = dist;
-          rhsValue = v.value;
-        }
+      if (v.col < eqCol) {
+        lhsCandidates.push(v);
+      } else if (v.col > eqCol + 2) {
+        // col > eqCol+2 to skip past the "==" itself (2 chars wide)
+        rhsCandidates.push(v);
+      }
+    }
+
+    // LHS: pick value closest to == (the outermost expression result)
+    let lhsValue: string | undefined;
+    let lhsBestDist = Infinity;
+    for (const v of lhsCandidates) {
+      const dist = eqCol - v.col;
+      if (dist < lhsBestDist) {
+        lhsBestDist = dist;
+        lhsValue = v.value;
+      }
+    }
+
+    // RHS: prefer simple values over Groovy map/object representations.
+    // In property-access chains like "gameState.expectedRoll", the intermediate
+    // object (gameState) resolves to a map string that is closer to == than the
+    // leaf value (expectedRoll). Filtering out map values lets us pick the leaf.
+    const simpleRhs = rhsCandidates.filter(v => !this.looksLikeMapValue(v.value));
+    const validRhs = simpleRhs.length > 0 ? simpleRhs : rhsCandidates;
+
+    let rhsValue: string | undefined;
+    let rhsBestDist = Infinity;
+    for (const v of validRhs) {
+      const dist = v.col - eqCol;
+      if (dist < rhsBestDist) {
+        rhsBestDist = dist;
+        rhsValue = v.value;
       }
     }
 
     if (lhsValue !== undefined && rhsValue !== undefined) {
+      // Sanity: if expected and actual are identical, diff is meaningless — skip
+      if (lhsValue === rhsValue) {
+        return undefined;
+      }
+      // Reject values that look like fully-qualified class names, object references, or stack fragments.
+      if (this.looksLikeClassName(lhsValue) || this.looksLikeClassName(rhsValue)) {
+        return undefined;
+      }
       // In Spock, `lhs == rhs` means rhs is the "expected" and lhs is the "actual"
       return { expected: rhsValue, actual: lhsValue };
     }
 
     return undefined;
+  }
+
+  /**
+   * Check if a string looks like a Java class name or object reference
+   * rather than a meaningful test value.
+   */
+  private looksLikeClassName(value: string): boolean {
+    // Matches patterns like "com.example.Foo", "Foo@1a2b3c", "com.example.Foo$Bar"
+    if (/^[a-zA-Z_]\w*(\.[a-zA-Z_]\w*){2,}/.test(value)) { return true; }
+    if (/^[a-zA-Z_]\w*@[0-9a-fA-F]+$/.test(value)) { return true; }
+    // Stack trace fragment
+    if (/^\s*at\s+/.test(value)) { return true; }
+    return false;
+  }
+
+  /**
+   * Check if a value looks like a Groovy map/object string representation
+   * rather than a simple expected/actual value. These appear as intermediate
+   * values in Spock power assertions when accessing properties of complex objects.
+   * Examples: [rolls:[3, 4], expectedFrame:10, expectedRoll:2, expectedGameOver:true]
+   */
+  private looksLikeMapValue(value: string): boolean {
+    return value.startsWith('[') && /\w+:\s*[^\s]/.test(value);
   }
 
   /**
@@ -567,49 +678,62 @@ export class TestResultParser {
   /**
    * Extract iteration info from a test name that may contain nested brackets.
    * Handles patterns like:
-   *   "test name [a: 1, b: 2, #0]"
-   *   "test name [gameState: [rolls:[3, 4], expectedFrame:2], #1]"
+   *   Standard:  "test name [a: 1, b: 2, #0]"
+   *   Nested:    "test name [gameState: [rolls:[3, 4], expectedFrame:2], #1]"
+   *   @Unroll:   "test name[0] - perfect game: [10, 10, 10] -> 300"
    * Returns the base test name, raw parameters string, and iteration index.
    */
   private extractIterationFromName(fullName: string): { baseName: string; parametersString: string; index: number } | null {
-    // Find the last occurrence of ", #N]" which marks the iteration index
+    // First, try the standard Spock format ending with ", #N]"
     const indexMatch = fullName.match(/,\s*#(\d+)\]\s*$/);
-    if (!indexMatch) {
-      return null;
-    }
-
-    const index = parseInt(indexMatch[1]);
-    // Find the opening bracket that corresponds to the closing bracket at the end
-    // Walk backwards from the position before ", #N]" to find the matching "["
-    const closingPos = fullName.length - indexMatch[0].length + indexMatch[0].indexOf(']');
-    
-    // Find the outermost opening bracket by counting bracket depth from the end
-    let depth = 1; // We start inside the closing bracket
-    let openPos = -1;
-    for (let i = closingPos - 1; i >= 0; i--) {
-      if (fullName[i] === ']') {
-        depth++;
-      } else if (fullName[i] === '[') {
-        depth--;
-        if (depth === 0) {
-          openPos = i;
-          break;
+    if (indexMatch) {
+      const index = parseInt(indexMatch[1]);
+      // Find the opening bracket that corresponds to the closing bracket at the end
+      // Walk backwards from the position before ", #N]" to find the matching "["
+      const closingPos = fullName.length - indexMatch[0].length + indexMatch[0].indexOf(']');
+      
+      // Find the outermost opening bracket by counting bracket depth from the end
+      let depth = 1; // We start inside the closing bracket
+      let openPos = -1;
+      for (let i = closingPos - 1; i >= 0; i--) {
+        if (fullName[i] === ']') {
+          depth++;
+        } else if (fullName[i] === '[') {
+          depth--;
+          if (depth === 0) {
+            openPos = i;
+            break;
+          }
         }
+      }
+
+      if (openPos !== -1) {
+        const baseName = fullName.substring(0, openPos).trim();
+        // Parameters string is between the opening bracket and the ", #N" part
+        const paramsEnd = fullName.lastIndexOf(`,${indexMatch[0].substring(1)}`) !== -1 
+          ? fullName.lastIndexOf(`,${indexMatch[0].substring(1)}`)
+          : fullName.lastIndexOf(`, #${index}]`);
+        const parametersString = fullName.substring(openPos + 1, paramsEnd).trim();
+
+        return { baseName, parametersString, index };
       }
     }
 
-    if (openPos === -1) {
-      return null;
+    // Then, try @Unroll custom pattern format: "baseName[N] - ..." or "baseName[N]"
+    // When @Unroll uses #iterationIndex, Spock produces names like:
+    //   "complex scoring scenarios[0] - perfect game: [10, 10, 10] -> 300"
+    const unrollMatch = fullName.match(/^(.+?)\[(\d+)\](.*)$/);
+    if (unrollMatch) {
+      const baseName = unrollMatch[1].trim();
+      const index = parseInt(unrollMatch[2]);
+      const suffix = unrollMatch[3].trim();
+      // Use the suffix (after the [N]) as a descriptive parameters string
+      const parametersString = suffix.startsWith('-') ? suffix.substring(1).trim() : suffix;
+
+      return { baseName, parametersString, index };
     }
 
-    const baseName = fullName.substring(0, openPos).trim();
-    // Parameters string is between the opening bracket and the ", #N" part
-    const paramsEnd = fullName.lastIndexOf(`,${indexMatch[0].substring(1)}`) !== -1 
-      ? fullName.lastIndexOf(`,${indexMatch[0].substring(1)}`)
-      : fullName.lastIndexOf(`, #${index}]`);
-    const parametersString = fullName.substring(openPos + 1, paramsEnd).trim();
-
-    return { baseName, parametersString, index };
+    return null;
   }
 
   /**
@@ -619,12 +743,13 @@ export class TestResultParser {
     consoleOutput: string, 
     testName: string, 
     className: string, 
-    workspacePath: string
+    workspacePath: string,
+    buildTool: BuildTool = 'gradle'
   ): Promise<TestIterationResult[]> {
     this.logger.appendLine(`TestResultParser: Parsing results for ${className}.${testName}`);
     
     // Try XML first (more accurate)
-    const allXmlResults = await this.parseXmlReport(workspacePath, className);
+    const allXmlResults = await this.parseXmlReport(workspacePath, className, buildTool);
     
     // Filter to only iterations belonging to this specific test method
     const xmlResults = allXmlResults.filter(r => {
@@ -636,11 +761,141 @@ export class TestResultParser {
       this.logger.appendLine(`TestResultParser: Using ${xmlResults.length} results from XML report (filtered from ${allXmlResults.length} total)`);
       return xmlResults;
     }
+
+    // For placeholder tests (e.g. "maximum of #a and #b is #c"), Spock replaces
+    // the placeholders with actual values in the XML (e.g. "maximum of 1 and 3 is 3")
+    // so the standard [params, #N] parsing won't find them. Try matching unrolled names.
+    if (testName.includes('#')) {
+      const placeholderResults = await this.parseXmlReportForPlaceholderTest(workspacePath, className, testName, buildTool);
+      if (placeholderResults.length > 0) {
+        this.logger.appendLine(`TestResultParser: Using ${placeholderResults.length} results from XML placeholder matching`);
+        return placeholderResults;
+      }
+    }
     
     // Fallback to console output
     const consoleResults = this.parseConsoleOutput(consoleOutput, testName);
     this.logger.appendLine(`TestResultParser: Using ${consoleResults.length} results from console output`);
     return consoleResults;
+  }
+
+  /**
+   * Match unrolled test names from XML for placeholder tests.
+   * Converts "maximum of #a and #b is #c" into a regex that matches
+   * "maximum of 1 and 3 is 3", extracting parameter values.
+   */
+  private async parseXmlReportForPlaceholderTest(
+    workspacePath: string,
+    className: string,
+    testName: string,
+    buildTool: BuildTool = 'gradle'
+  ): Promise<TestIterationResult[]> {
+    const placeholderRegex = this.buildPlaceholderRegex(testName);
+    if (!placeholderRegex) { return []; }
+
+    const testResultsDir = BuildToolService.getTestResultsDir(workspacePath, buildTool);
+    if (!fs.existsSync(testResultsDir)) { return []; }
+
+    const files = fs.readdirSync(testResultsDir);
+    const matchingFile = files.find(f => f.endsWith(`${className}.xml`));
+    if (!matchingFile) { return []; }
+
+    const xmlPath = path.join(testResultsDir, matchingFile);
+    const xmlContent = fs.readFileSync(xmlPath, 'utf8');
+    this.logger.appendLine(`TestResultParser: Matching placeholder test "${testName}" against XML: ${xmlPath}`);
+
+    const results: TestIterationResult[] = [];
+    const testcaseRegex = /<testcase\s+name="([^"]+)"[^>]*classname="([^"]+)"[^>]*time="([^"]*)"[^>]*(?:\/>|>([\s\S]*?)<\/testcase>)/g;
+    let match;
+    let index = 0;
+
+    while ((match = testcaseRegex.exec(xmlContent)) !== null) {
+      const fullName = this.decodeXmlEntities(match[1]);
+      const time = parseFloat(match[3] || '0');
+      const innerContent = match[4] || '';
+
+      const paramMatch = placeholderRegex.exec(fullName);
+      if (!paramMatch) { continue; }
+
+      const parameters = this.extractParametersFromPlaceholderMatch(testName, paramMatch);
+
+      const hasFailed = innerContent.includes('<failure');
+      const hasError = innerContent.includes('<error');
+      const success = !hasFailed && !hasError;
+
+      let errorInfo: { error: string; diff?: DiffInfo } | undefined;
+      if (hasFailed) {
+        const errorText = this.extractFullErrorFromXml(innerContent, 'failure');
+        const diff = this.parseExpectedActual(errorText);
+        errorInfo = { error: errorText, diff };
+      } else if (hasError) {
+        const errorText = this.extractFullErrorFromXml(innerContent, 'error');
+        const diff = this.parseExpectedActual(errorText);
+        errorInfo = { error: errorText, diff };
+      }
+
+      results.push({
+        index: index++,
+        displayName: fullName,
+        parameters,
+        success,
+        duration: time,
+        errorInfo,
+        output: fullName
+      });
+
+      this.logger.appendLine(`TestResultParser: Placeholder match #${index - 1}: "${fullName}" - ${success ? 'PASSED' : 'FAILED'}`);
+    }
+
+    return results;
+  }
+
+  /**
+   * Convert a placeholder test name to a regex pattern.
+   * "maximum of #a and #b is #c" → /^maximum of (.+?) and (.+?) is (.+?)$/
+   */
+  buildPlaceholderRegex(testName: string): RegExp | null {
+    const placeholders = testName.match(/#\w+/g);
+    if (!placeholders) { return null; }
+
+    // Escape the test name for regex, then replace escaped placeholders with capture groups
+    let pattern = testName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const placeholder of placeholders) {
+      const escaped = placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      pattern = pattern.replace(escaped, '(.+?)');
+    }
+
+    return new RegExp(`^${pattern}$`);
+  }
+
+  /**
+   * Extract parameters from a placeholder regex match.
+   * Maps each #varName in the original test name to the captured value.
+   */
+  private extractParametersFromPlaceholderMatch(
+    testName: string,
+    match: RegExpExecArray
+  ): Record<string, any> {
+    const placeholders = testName.match(/#(\w+)/g);
+    if (!placeholders) { return {}; }
+
+    const params: Record<string, any> = {};
+    for (let i = 0; i < placeholders.length; i++) {
+      const paramName = placeholders[i].substring(1); // Remove leading #
+      const value = match[i + 1]; // match[0] is the full match
+      if (value === undefined) { continue; }
+
+      // Try to parse as number or boolean
+      if (!isNaN(Number(value)) && value !== '') {
+        params[paramName] = Number(value);
+      } else if (value === 'true' || value === 'false') {
+        params[paramName] = value === 'true';
+      } else {
+        params[paramName] = value;
+      }
+    }
+
+    return params;
   }
 
   /**

@@ -15,7 +15,9 @@ describe('ConfigurationService', () => {
       expect(cfg.debugConnectionTimeout).toBe(60);
       expect(cfg.debugRetries).toBe(3);
       expect(cfg.additionalGradleArgs).toEqual([]);
+      expect(cfg.additionalMavenArgs).toEqual([]);
       expect(cfg.logLevel).toBe('info');
+      expect(cfg.showDiffView).toBe(false);
     });
 
     it('should return overridden debugPort', () => {
@@ -48,10 +50,22 @@ describe('ConfigurationService', () => {
       expect(cfg.additionalGradleArgs).toEqual(['--no-daemon', '-Dkey=val']);
     });
 
+    it('should return overridden additionalMavenArgs', () => {
+      __setConfigValue('spockTestRunner.additionalMavenArgs', ['-o', '-Dkey=val']);
+      const cfg = ConfigurationService.getConfig();
+      expect(cfg.additionalMavenArgs).toEqual(['-o', '-Dkey=val']);
+    });
+
     it('should return overridden logLevel', () => {
       __setConfigValue('spockTestRunner.logLevel', 'debug');
       const cfg = ConfigurationService.getConfig();
       expect(cfg.logLevel).toBe('debug');
+    });
+
+    it('should return overridden showDiffView', () => {
+      __setConfigValue('spockTestRunner.showDiffView', true);
+      const cfg = ConfigurationService.getConfig();
+      expect(cfg.showDiffView).toBe(true);
     });
   });
 

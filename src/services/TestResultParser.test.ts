@@ -125,6 +125,103 @@ result == expected
     it('should return undefined when no pattern matches', () => {
       expect(parser.parseExpectedActual('Some random error message')).toBeUndefined();
     });
+
+    it('should correctly parse boolean RHS value near == operator', () => {
+      // Bug fix: "true" at col 21 was incorrectly filtered as comparison result
+      // because tolerance was too wide (<=3). The == is at col 18 and "true" at 21.
+      const error = `Condition not satisfied:
+
+game.isGameOver() == gameOver
+|    |            |  |
+|    false        |  true
+|                 false
+`;
+      const result = parser.parseExpectedActual(error);
+      expect(result).toBeDefined();
+      expect(result!.expected).toBe('true');
+      expect(result!.actual).toBe('false');
+    });
+
+    it('should ignore Spock similarity analysis lines in power assertion', () => {
+      // Bug fix: similarity analysis tokens like "difference" were picked as RHS value
+      const error = `Condition not satisfied:
+
+frame.toString() == expectedDisplay
+|     |          |  |
+|     [0, X]     |  [0, /]
+[0, X]           false
+                 1 difference (83% similarity)
+                 [0, (X)]
+                 [0, (/)]
+`;
+      const result = parser.parseExpectedActual(error);
+      expect(result).toBeDefined();
+      expect(result!.expected).toBe('[0, /]');
+      expect(result!.actual).toBe('[0, X]');
+    });
+
+    it('should prefer simple value over map representation on RHS', () => {
+      // Bug fix: intermediate map value "[rolls:...]" was picked over leaf value "2"
+      const error = `Condition not satisfied:
+
+game.getCurrentRoll() == gameState.expectedRoll
+|    |                |  |         |
+|    3                |  |         2
+|                     |  [rolls:[3, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3, 4], expectedFrame:10, expectedRoll:2, expectedGameOver:true]
+|                     false
+`;
+      const result = parser.parseExpectedActual(error);
+      expect(result).toBeDefined();
+      expect(result!.expected).toBe('2');
+      expect(result!.actual).toBe('3');
+    });
+
+    it('should handle arithmetic RHS expression in power assertion', () => {
+      // When RHS is "10 + expectedBonus", the result (17) is under the + operator
+      const error = `Condition not satisfied:
+
+game.score() == 10 + expectedBonus
+|    |       |     | |
+|    24      false | 7
+|                  17
+`;
+      const result = parser.parseExpectedActual(error);
+      expect(result).toBeDefined();
+      expect(result!.expected).toBe('17');
+      expect(result!.actual).toBe('24');
+    });
+
+    it('should skip object representation lines in power assertion', () => {
+      // Bug fix: Groovy toString() dump line contains tokens like "frames=[[3,"
+      // that pollute value extraction when not filtered out.
+      const error = `Condition not satisfied:
+
+game.score() == expectedScore
+|    |       |  |
+|    16      |  18
+|            false
+<com.example.BowlingGame@4bff2185 frames=[[5, /], [3], [], [], [], [], [], [], [], []] currentFrame=1 currentRoll=1>
+`;
+      const result = parser.parseExpectedActual(error);
+      expect(result).toBeDefined();
+      expect(result!.expected).toBe('18');
+      expect(result!.actual).toBe('16');
+    });
+
+    it('should skip object representation lines without angle brackets', () => {
+      const error = `Condition not satisfied:
+
+game.score() == expectedScore
+|    |       |  |
+|    85      |  150
+|            false
+BowlingGame@6075b2d3 frames=[[5, /], [5, /], [5, /], [5, /], [5, /], [5, /]]
+`;
+      const result = parser.parseExpectedActual(error);
+      expect(result).toBeDefined();
+      expect(result!.expected).toBe('150');
+      expect(result!.actual).toBe('85');
+    });
   });
 
   // ── extractIterationInfo ──────────────────────────────────────────
@@ -194,6 +291,44 @@ result == expected
       const result = parser.extractIterationInfo('test [name: "Alice", #0]');
       expect(result).toBeDefined();
       expect(result!.parameters.name).toBe('Alice');
+    });
+  });
+
+  // ── buildPlaceholderRegex ─────────────────────────────────────────
+
+  describe('buildPlaceholderRegex', () => {
+    it('should convert placeholder test name to regex', () => {
+      const regex = parser.buildPlaceholderRegex('maximum of #a and #b is #c');
+      expect(regex).toBeDefined();
+      expect(regex!.test('maximum of 1 and 3 is 3')).toBe(true);
+      expect(regex!.test('maximum of 7 and 4 is 7')).toBe(true);
+      expect(regex!.test('maximum of 0 and 0 is 0')).toBe(true);
+      expect(regex!.test('something else')).toBe(false);
+    });
+
+    it('should handle placeholders at start and end of name', () => {
+      const regex = parser.buildPlaceholderRegex('#gameState should have score #expectedScore');
+      expect(regex).toBeDefined();
+      expect(regex!.test('perfect game should have score 300')).toBe(true);
+      expect(regex!.test('gutter game should have score 0')).toBe(true);
+    });
+
+    it('should handle single placeholder', () => {
+      const regex = parser.buildPlaceholderRegex('strike in frame #frame should give bonus points');
+      expect(regex).toBeDefined();
+      expect(regex!.test('strike in frame 1 should give bonus points')).toBe(true);
+      expect(regex!.test('strike in frame 10 should give bonus points')).toBe(true);
+    });
+
+    it('should return null for names without placeholders', () => {
+      expect(parser.buildPlaceholderRegex('simple test name')).toBeNull();
+    });
+
+    it('should escape regex special chars in the test name', () => {
+      const regex = parser.buildPlaceholderRegex('#a + #b = #c');
+      expect(regex).toBeDefined();
+      expect(regex!.test('1 + 2 = 3')).toBe(true);
+      expect(regex!.test('1 x 2 = 3')).toBe(false);
     });
   });
 });

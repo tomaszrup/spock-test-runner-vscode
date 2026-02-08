@@ -28,11 +28,11 @@ export function activate(context: vscode.ExtensionContext) {
       }
       
       const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
-      const projectRoot = workspaceFolder ? BuildToolService.findGradleProjectRoot(uri.fsPath, workspaceFolder.uri.fsPath) : null;
+      const projectRoot = workspaceFolder ? BuildToolService.findProjectRoot(uri.fsPath, workspaceFolder.uri.fsPath) : null;
       const testClassName = extractTestName(filePath);
 
       if (!workspaceFolder || !projectRoot || !testClassName) {
-        vscode.window.showErrorMessage('Invalid setup: Check workspace, Gradle build tool, or file name.');
+        vscode.window.showErrorMessage('Invalid setup: Check workspace, build tool (Gradle/Maven), or file name.');
         logger.appendLine(`[ERROR] ${filePath}: Invalid setup - Workspace: ${!!workspaceFolder}, ProjectRoot: ${projectRoot}, Class: ${testClassName}`);
         return;
       }
