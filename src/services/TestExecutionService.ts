@@ -7,10 +7,10 @@ import { ConfigurationService } from './ConfigurationService';
 import { DebugService } from './DebugService';
 
 export class TestExecutionService {
-  private logger: vscode.OutputChannel;
+  private logger: vscode.LogOutputChannel;
   private debugService: DebugService;
 
-  constructor(logger: vscode.OutputChannel) {
+  constructor(logger: vscode.LogOutputChannel) {
     this.logger = logger;
     this.debugService = new DebugService(logger);
   }

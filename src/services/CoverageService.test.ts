@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import * as fs from 'fs';
+import * as fsp from 'fs/promises';
 import * as path from 'path';
 import { Uri, TestCoverageCount, StatementCoverage, Position } from '../__mocks__/vscode';
 import { CoverageService, SpockFileCoverage } from '../services/CoverageService';
 
-vi.mock('fs');
-const mockedFs = vi.mocked(fs);
+vi.mock('fs/promises');
+const mockedFsp = vi.mocked(fsp);
 
 function createMockLogger() {
   return {
@@ -33,38 +33,45 @@ describe('CoverageService', () => {
   // ── findJacocoXmlReport ────────────────────────────────────────────
 
   describe('findJacocoXmlReport', () => {
-    it('should find report at standard path', () => {
+    it('should find report at standard path', async () => {
       const expectedPath = path.join('/project', 'build', 'reports', 'jacoco', 'test', 'jacocoTestReport.xml');
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => String(p) === expectedPath);
+      mockedFsp.access.mockImplementation(async (p: any) => {
+        if (String(p) === expectedPath) { return; }
+        throw new Error('ENOENT');
+      });
 
-      const result = service.findJacocoXmlReport('/project');
+      const result = await service.findJacocoXmlReport('/project');
       expect(result).toBe(expectedPath);
     });
 
-    it('should find report at alternative path', () => {
+    it('should find report at alternative path', async () => {
       const altPath = path.join('/project', 'build', 'reports', 'jacoco', 'jacocoTestReport.xml');
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => String(p) === altPath);
+      mockedFsp.access.mockImplementation(async (p: any) => {
+        if (String(p) === altPath) { return; }
+        throw new Error('ENOENT');
+      });
 
-      const result = service.findJacocoXmlReport('/project');
+      const result = await service.findJacocoXmlReport('/project');
       expect(result).toBe(altPath);
     });
 
-    it('should return null when no report exists', () => {
-      mockedFs.existsSync.mockReturnValue(false);
-      const result = service.findJacocoXmlReport('/project');
+    it('should return null when no report exists', async () => {
+      mockedFsp.access.mockRejectedValue(new Error('ENOENT'));
+      mockedFsp.readdir.mockResolvedValue([] as any);
+      const result = await service.findJacocoXmlReport('/project');
       expect(result).toBeNull();
     });
 
-    it('should find report via recursive search as fallback', () => {
+    it('should find report via recursive search as fallback', async () => {
       const jacocoDir = path.join('/project', 'build', 'reports', 'jacoco');
       const deepXml = path.join(jacocoDir, 'deep', 'report.xml');
 
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
-        const s = String(p);
-        return s === jacocoDir;
+      mockedFsp.access.mockImplementation(async (p: any) => {
+        if (String(p) === jacocoDir) { return; }
+        throw new Error('ENOENT');
       });
 
-      mockedFs.readdirSync.mockImplementation(((dir: string) => {
+      mockedFsp.readdir.mockImplementation((async (dir: string) => {
         if (dir === jacocoDir) {
           return [{ name: 'deep', isDirectory: () => true, isFile: () => false }] as any;
         }
@@ -74,15 +81,18 @@ describe('CoverageService', () => {
         return [];
       }) as any);
 
-      const result = service.findJacocoXmlReport('/project');
+      const result = await service.findJacocoXmlReport('/project');
       expect(result).toBe(deepXml);
     });
 
-    it('should find Maven JaCoCo report at standard path', () => {
+    it('should find Maven JaCoCo report at standard path', async () => {
       const expectedPath = path.join('/project', 'target', 'site', 'jacoco', 'jacoco.xml');
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => String(p) === expectedPath);
+      mockedFsp.access.mockImplementation(async (p: any) => {
+        if (String(p) === expectedPath) { return; }
+        throw new Error('ENOENT');
+      });
 
-      const result = service.findJacocoXmlReport('/project');
+      const result = await service.findJacocoXmlReport('/project');
       expect(result).toBe(expectedPath);
     });
   });
@@ -90,7 +100,7 @@ describe('CoverageService', () => {
   // ── parseJacocoReport ─────────────────────────────────────────────
 
   describe('parseJacocoReport', () => {
-    it('should parse a valid JaCoCo XML report', () => {
+    it('should parse a valid JaCoCo XML report', async () => {
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <report name="test">
   <package name="com/example">
@@ -102,19 +112,22 @@ describe('CoverageService', () => {
   </package>
 </report>`;
 
-      mockedFs.readFileSync.mockReturnValue(xml);
+      mockedFsp.readFile.mockResolvedValue(xml as any);
 
       // Mock file resolution - the source file must exist
       const sourcePath = path.join('/project', 'src', 'main', 'java', 'com', 'example', 'BowlingGame.java');
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => String(p) === sourcePath);
+      mockedFsp.access.mockImplementation(async (p: any) => {
+        if (String(p) === sourcePath) { return; }
+        throw new Error('ENOENT');
+      });
 
-      const results = service.parseJacocoReport('/report.xml', '/project');
+      const results = await service.parseJacocoReport('/report.xml', '/project');
       expect(results).toHaveLength(1);
       expect(results[0]).toBeInstanceOf(SpockFileCoverage);
       expect(results[0].details).toHaveLength(3);
     });
 
-    it('should return empty array for report with no matching source files', () => {
+    it('should return empty array for report with no matching source files', async () => {
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <report name="test">
   <package name="com/unknown">
@@ -124,14 +137,14 @@ describe('CoverageService', () => {
   </package>
 </report>`;
 
-      mockedFs.readFileSync.mockReturnValue(xml);
-      mockedFs.existsSync.mockReturnValue(false);
+      mockedFsp.readFile.mockResolvedValue(xml as any);
+      mockedFsp.access.mockRejectedValue(new Error('ENOENT'));
 
-      const results = service.parseJacocoReport('/report.xml', '/project');
+      const results = await service.parseJacocoReport('/report.xml', '/project');
       expect(results).toHaveLength(0);
     });
 
-    it('should handle branch coverage in lines', () => {
+    it('should handle branch coverage in lines', async () => {
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <report name="test">
   <package name="com/example">
@@ -141,11 +154,14 @@ describe('CoverageService', () => {
   </package>
 </report>`;
 
-      mockedFs.readFileSync.mockReturnValue(xml);
+      mockedFsp.readFile.mockResolvedValue(xml as any);
       const sourcePath = path.join('/project', 'src', 'main', 'java', 'com', 'example', 'Game.java');
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => String(p) === sourcePath);
+      mockedFsp.access.mockImplementation(async (p: any) => {
+        if (String(p) === sourcePath) { return; }
+        throw new Error('ENOENT');
+      });
 
-      const results = service.parseJacocoReport('/report.xml', '/project');
+      const results = await service.parseJacocoReport('/report.xml', '/project');
       expect(results).toHaveLength(1);
       const detail = results[0].details[0] as any;
       // Should have branch coverage

@@ -105,6 +105,12 @@ export class Diagnostic {
   }
 }
 
+export enum ProgressLocation {
+  SourceControl = 1,
+  Window = 10,
+  Notification = 15,
+}
+
 export enum DiagnosticSeverity {
   Error = 0,
   Warning = 1,
@@ -187,6 +193,19 @@ export enum TestRunProfileKind {
   Coverage = 3,
 }
 
+export class TestRunRequest {
+  include: any[] | undefined;
+  exclude: any[] | undefined;
+  profile: any;
+  continuous: boolean;
+  constructor(include?: any[], exclude?: any[], profile?: any, continuous?: boolean) {
+    this.include = include;
+    this.exclude = exclude;
+    this.profile = profile;
+    this.continuous = continuous ?? false;
+  }
+}
+
 // --- Events / disposables ------------------------------------------------
 
 export class EventEmitter<T> {
@@ -245,6 +264,16 @@ export const workspace = {
   fs: {
     readFile: async () => Buffer.from(''),
   },
+  findFiles: async () => [] as Uri[],
+  openTextDocument: async (uri: any) => ({ getText: () => '', uri }),
+  getWorkspaceFolder: (uri: any) => {
+    if (!workspace.workspaceFolders) { return undefined; }
+    return workspace.workspaceFolders.find((f: any) => {
+      const folderPath = f.uri?.fsPath || f.uri?.path || '';
+      const filePath = uri?.fsPath || uri?.path || '';
+      return filePath.startsWith(folderPath);
+    });
+  },
 };
 
 /** Helper for tests to set configuration values */
@@ -262,7 +291,7 @@ export function __resetConfig(): void {
 // --- Window --------------------------------------------------------------
 
 export const window = {
-  createOutputChannel: (name: string) => ({
+  createOutputChannel: (name: string, _options?: any) => ({
     name,
     appendLine: () => {},
     append: () => {},
@@ -270,7 +299,21 @@ export const window = {
     show: () => {},
     hide: () => {},
     dispose: () => {},
+    replace: () => {},
+    // LogOutputChannel methods
+    trace: () => {},
+    debug: () => {},
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    logLevel: 2, // Info
+    onDidChangeLogLevel: () => ({ dispose: () => {} }),
   }),
+  withProgress: async (_options: any, task: (progress: any, token: any) => any) => {
+    const progress = { report: () => {} };
+    const token = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => {} }) };
+    return task(progress, token);
+  },
   showErrorMessage: async () => undefined,
   showWarningMessage: async () => undefined,
   showInformationMessage: async () => undefined,
@@ -312,20 +355,37 @@ export const debug = {
 // --- Tests ---------------------------------------------------------------
 
 export const tests = {
+  _controllers: [] as any[],
   createTestController: (id: string, label: string) => {
     const items = createTestItemCollection();
-    return {
+    const controller = {
       id,
       label,
       items,
       createTestItem: (id: string, label: string, uri?: Uri) => {
         const children = createTestItemCollection();
-        return { id, label, uri, children, tags: [], range: undefined, canResolveChildren: false, busy: false, error: undefined };
+        return { id, label, uri, children, tags: [], range: undefined, canResolveChildren: false, busy: false, error: undefined, parent: undefined, description: undefined };
       },
-      createRunProfile: () => ({ dispose: () => {} }),
+      createRunProfile: (_name: string, _kind?: any, _handler?: any, _isDefault?: boolean, _tag?: any) => ({
+        supportsContinuousRun: false,
+        loadDetailedCoverage: undefined as any,
+        dispose: () => {},
+      }),
+      createTestRun: (_request: any) => ({
+        appendOutput: () => {},
+        passed: () => {},
+        failed: () => {},
+        skipped: () => {},
+        started: () => {},
+        end: () => {},
+        addCoverage: () => {},
+      }),
       resolveHandler: undefined as any,
+      refreshHandler: undefined as any,
       dispose: () => {},
     };
+    tests._controllers.push(controller);
+    return controller;
   },
 };
 
@@ -340,6 +400,24 @@ function createTestItemCollection() {
     forEach: (cb: (item: any) => void) => map.forEach(cb),
     [Symbol.iterator]: () => map.values(),
   };
+}
+
+// --- TestMessage ---------------------------------------------------------
+
+export class TestMessage {
+  message: string;
+  expectedOutput?: string;
+  actualOutput?: string;
+  location?: Location;
+  constructor(message: string) {
+    this.message = message;
+  }
+  static diff(message: string, expected: string, actual: string): TestMessage {
+    const msg = new TestMessage(message);
+    msg.expectedOutput = expected;
+    msg.actualOutput = actual;
+    return msg;
+  }
 }
 
 // --- MarkdownString (minimal) --------------------------------------------

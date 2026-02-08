@@ -14,7 +14,6 @@ vi.mock('../services/ConfigurationService', () => ({
       debugRetries: 3,
       additionalGradleArgs: [],
       additionalMavenArgs: [],
-      logLevel: 'info',
     }),
   },
 }));

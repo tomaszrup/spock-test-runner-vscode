@@ -1,14 +1,26 @@
 import * as fs from 'fs';
+import * as fsp from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { XMLParser } from 'fast-xml-parser';
 import { BuildTool, DiffInfo, TestIterationResult } from '../types';
 import { BuildToolService } from './BuildToolService';
 
 export class TestResultParser {
-  private logger: vscode.OutputChannel;
+  private logger: vscode.LogOutputChannel;
+  private xmlParser: XMLParser;
 
-  constructor(logger: vscode.OutputChannel) {
+  constructor(logger: vscode.LogOutputChannel) {
     this.logger = logger;
+    this.xmlParser = new XMLParser({
+      ignoreAttributes: false,
+      attributeNamePrefix: '@_',
+      textNodeName: '#text',
+      cdataPropName: '#cdata',
+      allowBooleanAttributes: true,
+      parseTagValue: false,
+      trimValues: false,
+    });
   }
 
   /**
@@ -115,13 +127,15 @@ export class TestResultParser {
     const testResultsDir = BuildToolService.getTestResultsDir(workspacePath, buildTool);
 
     try {
-      if (!fs.existsSync(testResultsDir)) {
+      try {
+        await fsp.access(testResultsDir);
+      } catch {
         this.logger.appendLine(`TestResultParser: XML report directory not found: ${testResultsDir}`);
         return results;
       }
 
       // Find the XML file for this class (could be FQN like TEST-com.example.ClassName.xml)
-      const files = fs.readdirSync(testResultsDir);
+      const files = await fsp.readdir(testResultsDir);
       const matchingFile = files.find(f => f.endsWith(`${className}.xml`));
       if (!matchingFile) {
         this.logger.appendLine(`TestResultParser: No XML report found for class ${className}`);
@@ -129,38 +143,31 @@ export class TestResultParser {
       }
 
       const xmlPath = path.join(testResultsDir, matchingFile);
-      const xmlContent = fs.readFileSync(xmlPath, 'utf8');
+      const xmlContent = await fsp.readFile(xmlPath, 'utf8');
       this.logger.appendLine(`TestResultParser: Parsing XML report: ${xmlPath}`);
 
-      // Parse XML to extract testcase elements
-      // Match testcase elements - self-closing (passed) and with body (failed/error)
-      const testcaseRegex = /<testcase\s+name="([^"]+)"[^>]*classname="([^"]+)"[^>]*time="([^"]*)"[^>]*(?:\/>|>([\s\S]*?)<\/testcase>)/g;
-      let match;
+      const parsed = this.xmlParser.parse(xmlContent);
+      const testcases = this.extractTestCases(parsed);
 
-      while ((match = testcaseRegex.exec(xmlContent)) !== null) {
-        const fullName = match[1];
-        const testClassName = match[2];
-        const time = parseFloat(match[3] || '0');
-        const innerContent = match[4] || '';
+      for (const tc of testcases) {
+        const fullName = tc['@_name'] || '';
+        const time = parseFloat(tc['@_time'] || '0');
 
         // Check if this is an iteration (contains parameter values and index)
-        // Use helper that handles nested brackets like [gameState: [rolls:[3, 4], ...], #2]
         const iterationInfo = this.extractIterationFromName(fullName);
         
         if (iterationInfo) {
           const parameters = this.parseParameters(iterationInfo.parametersString);
           
-          const hasFailed = innerContent.includes('<failure');
-          const hasError = innerContent.includes('<error');
-          const success = !hasFailed && !hasError;
+          const { hasFailed, hasError, success } = this.getTestCaseStatus(tc);
 
           let errorInfo: { error: string; diff?: DiffInfo } | undefined;
           if (hasFailed) {
-            const errorText = this.extractFullErrorFromXml(innerContent, 'failure');
+            const errorText = this.extractErrorFromTestCase(tc, 'failure');
             const diff = this.parseExpectedActual(errorText);
             errorInfo = { error: errorText, diff };
           } else if (hasError) {
-            const errorText = this.extractFullErrorFromXml(innerContent, 'error');
+            const errorText = this.extractErrorFromTestCase(tc, 'error');
             const diff = this.parseExpectedActual(errorText);
             errorInfo = { error: errorText, diff };
           }
@@ -234,13 +241,15 @@ export class TestResultParser {
     const testResultsDir = BuildToolService.getTestResultsDir(workspacePath, buildTool);
 
     try {
-      if (!fs.existsSync(testResultsDir)) {
+      try {
+        await fsp.access(testResultsDir);
+      } catch {
         this.logger.appendLine(`TestResultParser: Test results directory not found: ${testResultsDir}`);
         return new Map();
       }
 
       // Find the XML file for this class (could be FQN like TEST-com.example.ClassName.xml)
-      const files = fs.readdirSync(testResultsDir);
+      const files = await fsp.readdir(testResultsDir);
       const matchingFile = files.find(f => f.endsWith(`${className}.xml`));
       if (!matchingFile) {
         this.logger.appendLine(`TestResultParser: No XML report found for class ${className}`);
@@ -254,79 +263,91 @@ export class TestResultParser {
     }
   }
 
-  private parseXmlFileForClassResults(xmlPath: string): Map<string, {success: boolean; skipped: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}> {
+  private async parseXmlFileForClassResults(xmlPath: string): Promise<Map<string, {success: boolean; skipped: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}>> {
     const results = new Map<string, {success: boolean; skipped: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}>();
-    const xmlContent = fs.readFileSync(xmlPath, 'utf8');
+    const xmlContent = await fsp.readFile(xmlPath, 'utf8');
     this.logger.appendLine(`TestResultParser: Parsing XML for class results: ${xmlPath}`);
 
-    // Match testcase elements - self-closing (passed) and with body (failed/error/skipped)
-    const testcaseRegex = /<testcase\s+name="([^"]+)"[^>]*time="([^"]*)"[^>]*(?:\/>|>([\s\S]*?)<\/testcase>)/g;
-    let match;
+    const parsed = this.xmlParser.parse(xmlContent);
+    const testcases = this.extractTestCases(parsed);
 
-    while ((match = testcaseRegex.exec(xmlContent)) !== null) {
-      const testName = match[1];
-      const time = parseFloat(match[2] || '0');
-      const innerContent = match[3] || '';
+    for (const tc of testcases) {
+      const testName = tc['@_name'] || '';
+      const time = parseFloat(tc['@_time'] || '0');
 
-      const hasFailed = innerContent.includes('<failure');
-      const hasError = innerContent.includes('<error');
-      const hasSkipped = innerContent.includes('<skipped');
+      const { hasFailed, hasError, success } = this.getTestCaseStatus(tc);
+      const hasSkipped = !!tc['skipped'];
 
       let errorMessage: string | undefined;
       let diff: DiffInfo | undefined;
       if (hasFailed) {
-        errorMessage = this.extractFullErrorFromXml(innerContent, 'failure');
+        errorMessage = this.extractErrorFromTestCase(tc, 'failure');
         diff = this.parseExpectedActual(errorMessage);
       } else if (hasError) {
-        errorMessage = this.extractFullErrorFromXml(innerContent, 'error');
+        errorMessage = this.extractErrorFromTestCase(tc, 'error');
         diff = this.parseExpectedActual(errorMessage);
       }
 
-      results.set(testName, { success: !hasFailed && !hasError, skipped: hasSkipped, duration: time, errorMessage, diff });
+      results.set(testName, { success, skipped: hasSkipped, duration: time, errorMessage, diff });
     }
 
     this.logger.appendLine(`TestResultParser: Found ${results.size} test results in XML`);
     return results;
   }
 
+  // ── XML helper methods (fast-xml-parser) ───────────────────────────
+
   /**
-   * Extract full error message including stack trace from XML failure/error element.
-   * Handles both CDATA sections and plain text content, plus the message attribute.
+   * Extract testcase elements from a parsed JUnit XML structure.
+   * Handles both single testcase and arrays of testcases.
    */
-  private extractFullErrorFromXml(innerContent: string, tag: 'failure' | 'error'): string {
-    // Try to get the message attribute first
-    const messageAttrMatch = innerContent.match(new RegExp(`<${tag}[^>]*message="([^"]*)"`));
-    const messageAttr = messageAttrMatch ? this.decodeXmlEntities(messageAttrMatch[1]) : '';
-
-    // Try to get the full body content (which typically includes the stack trace)
-    // Handle CDATA: <failure ...><![CDATA[...]]></failure>
-    const cdataMatch = innerContent.match(new RegExp(`<${tag}[^>]*>\\s*<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>\\s*<\\/${tag}>`));
-    if (cdataMatch) {
-      const body = cdataMatch[1].trim();
-      return body || messageAttr || `Test ${tag}`;
-    }
-
-    // Handle plain text body: <failure ...>text</failure>
-    const bodyMatch = innerContent.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`));
-    if (bodyMatch) {
-      const body = this.decodeXmlEntities(bodyMatch[1]).trim();
-      return body || messageAttr || `Test ${tag}`;
-    }
-
-    // Self-closing with only message attribute: <failure message="..." />
-    return messageAttr || `Test ${tag}`;
+  private extractTestCases(parsed: any): any[] {
+    const testsuite = parsed?.testsuite;
+    if (!testsuite) { return []; }
+    const tc = testsuite.testcase;
+    if (!tc) { return []; }
+    return Array.isArray(tc) ? tc : [tc];
   }
 
   /**
-   * Decode common XML entities back to their original characters.
+   * Determine pass/fail/error status from a parsed testcase object.
    */
-  private decodeXmlEntities(text: string): string {
-    return text
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&apos;/g, "'");
+  private getTestCaseStatus(tc: any): { hasFailed: boolean; hasError: boolean; success: boolean } {
+    const hasFailed = !!tc['failure'];
+    const hasError = !!tc['error'];
+    return { hasFailed, hasError, success: !hasFailed && !hasError };
+  }
+
+  /**
+   * Extract error text from a parsed testcase's failure or error element.
+   * fast-xml-parser provides the text content, CDATA, and attributes.
+   */
+  private extractErrorFromTestCase(tc: any, tag: 'failure' | 'error'): string {
+    const element = tc[tag];
+    if (!element) { return `Test ${tag}`; }
+
+    // fast-xml-parser may return a string (text-only element) or an object
+    if (typeof element === 'string') {
+      return element.trim() || `Test ${tag}`;
+    }
+
+    // Try CDATA content first, then plain text body, then message attribute
+    const cdata = element['#cdata'];
+    if (cdata) {
+      const text = typeof cdata === 'string' ? cdata : String(cdata);
+      if (text.trim()) { return text.trim(); }
+    }
+
+    const textBody = element['#text'];
+    if (textBody) {
+      const text = typeof textBody === 'string' ? textBody : String(textBody);
+      if (text.trim()) { return text.trim(); }
+    }
+
+    const message = element['@_message'];
+    if (message) { return message; }
+
+    return `Test ${tag}`;
   }
 
   /**
@@ -795,42 +816,43 @@ export class TestResultParser {
     if (!placeholderRegex) { return []; }
 
     const testResultsDir = BuildToolService.getTestResultsDir(workspacePath, buildTool);
-    if (!fs.existsSync(testResultsDir)) { return []; }
+    try {
+      await fsp.access(testResultsDir);
+    } catch {
+      return [];
+    }
 
-    const files = fs.readdirSync(testResultsDir);
+    const files = await fsp.readdir(testResultsDir);
     const matchingFile = files.find(f => f.endsWith(`${className}.xml`));
     if (!matchingFile) { return []; }
 
     const xmlPath = path.join(testResultsDir, matchingFile);
-    const xmlContent = fs.readFileSync(xmlPath, 'utf8');
+    const xmlContent = await fsp.readFile(xmlPath, 'utf8');
     this.logger.appendLine(`TestResultParser: Matching placeholder test "${testName}" against XML: ${xmlPath}`);
 
+    const parsed = this.xmlParser.parse(xmlContent);
+    const testcases = this.extractTestCases(parsed);
     const results: TestIterationResult[] = [];
-    const testcaseRegex = /<testcase\s+name="([^"]+)"[^>]*classname="([^"]+)"[^>]*time="([^"]*)"[^>]*(?:\/>|>([\s\S]*?)<\/testcase>)/g;
-    let match;
     let index = 0;
 
-    while ((match = testcaseRegex.exec(xmlContent)) !== null) {
-      const fullName = this.decodeXmlEntities(match[1]);
-      const time = parseFloat(match[3] || '0');
-      const innerContent = match[4] || '';
+    for (const tc of testcases) {
+      const fullName = tc['@_name'] || '';
+      const time = parseFloat(tc['@_time'] || '0');
 
       const paramMatch = placeholderRegex.exec(fullName);
       if (!paramMatch) { continue; }
 
       const parameters = this.extractParametersFromPlaceholderMatch(testName, paramMatch);
 
-      const hasFailed = innerContent.includes('<failure');
-      const hasError = innerContent.includes('<error');
-      const success = !hasFailed && !hasError;
+      const { hasFailed, hasError, success } = this.getTestCaseStatus(tc);
 
       let errorInfo: { error: string; diff?: DiffInfo } | undefined;
       if (hasFailed) {
-        const errorText = this.extractFullErrorFromXml(innerContent, 'failure');
+        const errorText = this.extractErrorFromTestCase(tc, 'failure');
         const diff = this.parseExpectedActual(errorText);
         errorInfo = { error: errorText, diff };
       } else if (hasError) {
-        const errorText = this.extractFullErrorFromXml(innerContent, 'error');
+        const errorText = this.extractErrorFromTestCase(tc, 'error');
         const diff = this.parseExpectedActual(errorText);
         errorInfo = { error: errorText, diff };
       }

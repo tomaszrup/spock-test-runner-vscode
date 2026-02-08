@@ -1,6 +1,7 @@
-import * as fs from 'fs';
+import * as fsp from 'fs/promises';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { XMLParser } from 'fast-xml-parser';
 
 /**
  * Detailed coverage data for a single source file, used to provide
@@ -35,17 +36,24 @@ export class SpockFileCoverage extends vscode.FileCoverage {
  * {@link FileCoverage} / {@link StatementCoverage} objects.
  */
 export class CoverageService {
-  private logger: vscode.OutputChannel;
+  private logger: vscode.LogOutputChannel;
+  private xmlParser: XMLParser;
 
-  constructor(logger: vscode.OutputChannel) {
+  constructor(logger: vscode.LogOutputChannel) {
     this.logger = logger;
+    this.xmlParser = new XMLParser({
+      ignoreAttributes: false,
+      attributeNamePrefix: '@_',
+      parseTagValue: false,
+      trimValues: true,
+    });
   }
 
   /**
    * Locate the JaCoCo XML report file under the project build directory.
    * Checks common JaCoCo output paths for Gradle and Maven projects.
    */
-  findJacocoXmlReport(projectRoot: string): string | null {
+  async findJacocoXmlReport(projectRoot: string): Promise<string | null> {
     const candidates = [
       // Gradle paths
       path.join(projectRoot, 'build', 'reports', 'jacoco', 'test', 'jacocoTestReport.xml'),
@@ -57,10 +65,11 @@ export class CoverageService {
     ];
 
     for (const candidate of candidates) {
-      if (fs.existsSync(candidate)) {
+      try {
+        await fsp.access(candidate);
         this.logger.appendLine(`CoverageService: Found JaCoCo XML report at ${candidate}`);
         return candidate;
-      }
+      } catch { /* not found */ }
     }
 
     // Fallback: glob for any *.xml inside build/reports/jacoco or target/site/jacoco
@@ -69,25 +78,70 @@ export class CoverageService {
       path.join(projectRoot, 'target', 'site', 'jacoco'),
     ];
     for (const jacocoDir of jacocoDirs) {
-      if (fs.existsSync(jacocoDir)) {
-        const found = this.findXmlRecursive(jacocoDir);
+      try {
+        await fsp.access(jacocoDir);
+        const found = await this.findXmlRecursive(jacocoDir);
         if (found) {
           this.logger.appendLine(`CoverageService: Found JaCoCo XML report (recursive) at ${found}`);
           return found;
         }
-      }
+      } catch { /* dir not found */ }
     }
 
     this.logger.appendLine('CoverageService: No JaCoCo XML report found');
     return null;
   }
 
-  private findXmlRecursive(dir: string): string | null {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+  /**
+   * Find all JaCoCo XML reports across the root project and its sub-modules.
+   * Returns an array of `{ xmlPath, projectRoot }` for aggregation.
+   */
+  async findAllJacocoXmlReports(rootProjectPath: string): Promise<Array<{ xmlPath: string; projectRoot: string }>> {
+    const results: Array<{ xmlPath: string; projectRoot: string }> = [];
+
+    // Check root project itself
+    const rootXml = await this.findJacocoXmlReport(rootProjectPath);
+    if (rootXml) {
+      results.push({ xmlPath: rootXml, projectRoot: rootProjectPath });
+    }
+
+    // Scan immediate sub-directories for sub-modules with their own JaCoCo reports
+    try {
+      const entries = await fsp.readdir(rootProjectPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) { continue; }
+        // Skip common non-module dirs
+        if (['node_modules', '.gradle', '.mvn', 'build', 'target', 'gradle', '.git', '.idea'].includes(entry.name)) { continue; }
+
+        const subDir = path.join(rootProjectPath, entry.name);
+        // A sub-module should have its own build file
+        const hasBuildFile = await this.fileExists(path.join(subDir, 'build.gradle'))
+          || await this.fileExists(path.join(subDir, 'build.gradle.kts'))
+          || await this.fileExists(path.join(subDir, 'pom.xml'));
+
+        if (!hasBuildFile) { continue; }
+
+        const subXml = await this.findJacocoXmlReport(subDir);
+        if (subXml) {
+          results.push({ xmlPath: subXml, projectRoot: subDir });
+        }
+      }
+    } catch { /* root dir not readable */ }
+
+    this.logger.appendLine(`CoverageService: Found ${results.length} JaCoCo reports across project`);
+    return results;
+  }
+
+  private async fileExists(filePath: string): Promise<boolean> {
+    try { await fsp.access(filePath); return true; } catch { return false; }
+  }
+
+  private async findXmlRecursive(dir: string): Promise<string | null> {
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        const found = this.findXmlRecursive(fullPath);
+        const found = await this.findXmlRecursive(fullPath);
         if (found) { return found; }
       } else if (entry.name.endsWith('.xml')) {
         return fullPath;
@@ -103,34 +157,34 @@ export class CoverageService {
    * @param projectRoot  Gradle project root (used to resolve source file paths).
    * @returns An array of {@link SpockFileCoverage} instances.
    */
-  parseJacocoReport(xmlPath: string, projectRoot: string): SpockFileCoverage[] {
-    const xml = fs.readFileSync(xmlPath, 'utf8');
+  async parseJacocoReport(xmlPath: string, projectRoot: string): Promise<SpockFileCoverage[]> {
+    const xml = await fsp.readFile(xmlPath, 'utf8');
     const fileCoverages: SpockFileCoverage[] = [];
 
-    // Parse <package> elements
-    const packageRegex = /<package\s+name="([^"]*)">([\s\S]*?)<\/package>/g;
-    let packageMatch: RegExpExecArray | null;
+    const parsed = this.xmlParser.parse(xml);
+    const report = parsed?.report;
+    if (!report) {
+      this.logger.appendLine('CoverageService: No <report> element found in JaCoCo XML');
+      return fileCoverages;
+    }
 
-    while ((packageMatch = packageRegex.exec(xml)) !== null) {
-      const packageName = packageMatch[1]; // e.g. "com/example"
-      const packageContent = packageMatch[2];
+    const packages = this.asArray(report['package']);
 
-      // Parse <sourcefile> elements within this package
-      const sourceFileRegex = /<sourcefile\s+name="([^"]*)">([\s\S]*?)<\/sourcefile>/g;
-      let sourceFileMatch: RegExpExecArray | null;
+    for (const pkg of packages) {
+      const packageName = pkg['@_name'] || ''; // e.g. "com/example"
+      const sourceFiles = this.asArray(pkg['sourcefile']);
 
-      while ((sourceFileMatch = sourceFileRegex.exec(packageContent)) !== null) {
-        const sourceFileName = sourceFileMatch[1]; // e.g. "BowlingGame.java"
-        const sourceFileContent = sourceFileMatch[2];
+      for (const sf of sourceFiles) {
+        const sourceFileName = sf['@_name'] || ''; // e.g. "BowlingGame.java"
 
         // Resolve the source file URI
-        const sourceUri = this.resolveSourceFile(projectRoot, packageName, sourceFileName);
+        const sourceUri = await this.resolveSourceFile(projectRoot, packageName, sourceFileName);
         if (!sourceUri) {
           this.logger.appendLine(`CoverageService: Could not resolve source file: ${packageName}/${sourceFileName}`);
           continue;
         }
 
-        const coverage = this.parseSourceFileCoverage(sourceUri, sourceFileContent);
+        const coverage = this.parseSourceFileCoverage(sourceUri, sf);
         if (coverage) {
           fileCoverages.push(coverage);
         }
@@ -141,12 +195,18 @@ export class CoverageService {
     return fileCoverages;
   }
 
+  /** Ensure a value is always an array (handles fast-xml-parser single-element quirk). */
+  private asArray<T>(value: T | T[] | undefined): T[] {
+    if (!value) { return []; }
+    return Array.isArray(value) ? value : [value];
+  }
+
   /**
-   * Parse line and counter data from a single <sourcefile> element.
+   * Parse line and counter data from a parsed <sourcefile> object.
    */
   private parseSourceFileCoverage(
     sourceUri: vscode.Uri,
-    sourceFileContent: string,
+    sourceFile: any,
   ): SpockFileCoverage | null {
     const details: vscode.StatementCoverage[] = [];
 
@@ -156,19 +216,15 @@ export class CoverageService {
     let branchesCovered = 0;
     let branchesTotal = 0;
 
-    // Parse <line> elements: <line nr="10" mi="0" ci="3" mb="0" cb="2"/>
-    //   nr = line number
-    //   mi = missed instructions, ci = covered instructions
-    //   mb = missed branches, cb = covered branches
-    const lineRegex = /<line\s+nr="(\d+)"\s+mi="(\d+)"\s+ci="(\d+)"\s+mb="(\d+)"\s+cb="(\d+)"\s*\/>/g;
-    let lineMatch: RegExpExecArray | null;
+    // Parse <line> elements: nr, mi, ci, mb, cb
+    const lines = this.asArray(sourceFile['line']);
 
-    while ((lineMatch = lineRegex.exec(sourceFileContent)) !== null) {
-      const lineNumber = parseInt(lineMatch[1], 10);
-      const missedInstructions = parseInt(lineMatch[2], 10);
-      const coveredInstructions = parseInt(lineMatch[3], 10);
-      const missedBranches = parseInt(lineMatch[4], 10);
-      const coveredBranches = parseInt(lineMatch[5], 10);
+    for (const line of lines) {
+      const lineNumber = parseInt(line['@_nr'] || '0', 10);
+      const missedInstructions = parseInt(line['@_mi'] || '0', 10);
+      const coveredInstructions = parseInt(line['@_ci'] || '0', 10);
+      const missedBranches = parseInt(line['@_mb'] || '0', 10);
+      const coveredBranches = parseInt(line['@_cb'] || '0', 10);
 
       // A line is "covered" if at least one instruction was executed
       const executed = coveredInstructions > 0;
@@ -182,7 +238,6 @@ export class CoverageService {
         branchesTotal += totalBranches;
         branchesCovered += coveredBranches;
 
-        // Represent as covered/missed branch entries
         for (let b = 0; b < coveredBranches; b++) {
           branches.push(new vscode.BranchCoverage(true, new vscode.Position(lineNumber - 1, 0)));
         }
@@ -207,14 +262,17 @@ export class CoverageService {
       return null;
     }
 
-    // Also try to extract method-level counters from <counter> elements
+    // Extract METHOD counter from <counter type="METHOD" .../>
     let methodsCovered = 0;
     let methodsTotal = 0;
-    const methodCounterRegex = /<counter\s+type="METHOD"\s+missed="(\d+)"\s+covered="(\d+)"\s*\/>/g;
-    let methodMatch: RegExpExecArray | null;
-    while ((methodMatch = methodCounterRegex.exec(sourceFileContent)) !== null) {
-      methodsTotal += parseInt(methodMatch[1], 10) + parseInt(methodMatch[2], 10);
-      methodsCovered += parseInt(methodMatch[2], 10);
+    const counters = this.asArray(sourceFile['counter']);
+    for (const counter of counters) {
+      if (counter['@_type'] === 'METHOD') {
+        const missed = parseInt(counter['@_missed'] || '0', 10);
+        const covered = parseInt(counter['@_covered'] || '0', 10);
+        methodsTotal += missed + covered;
+        methodsCovered += covered;
+      }
     }
 
     const statementCount = new vscode.TestCoverageCount(linesCovered, linesTotal);
@@ -232,11 +290,11 @@ export class CoverageService {
    * Resolve a JaCoCo package/file reference to an actual workspace URI.
    * Searches common Gradle source sets: src/main/java, src/main/groovy, etc.
    */
-  private resolveSourceFile(
+  private async resolveSourceFile(
     projectRoot: string,
     packagePath: string, // e.g. "com/example"
     fileName: string,    // e.g. "BowlingGame.java"
-  ): vscode.Uri | null {
+  ): Promise<vscode.Uri | null> {
     const sourceSets = [
       path.join('src', 'main', 'java'),
       path.join('src', 'main', 'groovy'),
@@ -248,9 +306,10 @@ export class CoverageService {
 
     for (const srcSet of sourceSets) {
       const candidate = path.join(projectRoot, srcSet, packagePath, fileName);
-      if (fs.existsSync(candidate)) {
+      try {
+        await fsp.access(candidate);
         return vscode.Uri.file(candidate);
-      }
+      } catch { /* not found */ }
     }
 
     return null;

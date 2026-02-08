@@ -2,8 +2,6 @@ import * as vscode from 'vscode';
 
 const SECTION = 'spockTestRunner';
 
-export type LogLevel = 'off' | 'error' | 'info' | 'debug';
-
 export interface SpockTestRunnerConfig {
   /** Port used for JVM debug agent (JDWP). Default: 5005 */
   debugPort: number;
@@ -17,9 +15,7 @@ export interface SpockTestRunnerConfig {
   additionalGradleArgs: string[];
   /** Extra Maven CLI arguments. Default: [] */
   additionalMavenArgs: string[];
-  /** Output channel log level. Default: 'info' */
-  logLevel: LogLevel;
-  /** (Preview) Show inline diff view for failed assertions. Default: true */
+  /** (Preview) Show inline diff view for failed assertions. Default: false */
   showDiffView: boolean;
 }
 
@@ -49,7 +45,6 @@ export class ConfigurationService {
       debugRetries: cfg.get<number>('debugRetries', 3),
       additionalGradleArgs: cfg.get<string[]>('additionalGradleArgs', []),
       additionalMavenArgs: cfg.get<string[]>('additionalMavenArgs', []),
-      logLevel: cfg.get<LogLevel>('logLevel', 'info'),
       showDiffView: cfg.get<boolean>('showDiffView', false),
     };
   }

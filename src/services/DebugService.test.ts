@@ -19,7 +19,6 @@ vi.mock('../services/ConfigurationService', () => ({
       debugConnectionTimeout: 1, // short timeout for tests
       debugRetries: 1,
       additionalGradleArgs: [],
-      logLevel: 'info',
     }),
   },
 }));

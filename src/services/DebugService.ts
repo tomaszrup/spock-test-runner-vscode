@@ -7,9 +7,9 @@ import { BuildToolService } from './BuildToolService';
 import { ConfigurationService } from './ConfigurationService';
 
 export class DebugService {
-  private logger: vscode.OutputChannel;
+  private logger: vscode.LogOutputChannel;
 
-  constructor(logger: vscode.OutputChannel) {
+  constructor(logger: vscode.LogOutputChannel) {
     this.logger = logger;
   }
 

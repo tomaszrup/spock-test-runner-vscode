@@ -16,7 +16,6 @@ describe('ConfigurationService', () => {
       expect(cfg.debugRetries).toBe(3);
       expect(cfg.additionalGradleArgs).toEqual([]);
       expect(cfg.additionalMavenArgs).toEqual([]);
-      expect(cfg.logLevel).toBe('info');
       expect(cfg.showDiffView).toBe(false);
     });
 
@@ -54,12 +53,6 @@ describe('ConfigurationService', () => {
       __setConfigValue('spockTestRunner.additionalMavenArgs', ['-o', '-Dkey=val']);
       const cfg = ConfigurationService.getConfig();
       expect(cfg.additionalMavenArgs).toEqual(['-o', '-Dkey=val']);
-    });
-
-    it('should return overridden logLevel', () => {
-      __setConfigValue('spockTestRunner.logLevel', 'debug');
-      const cfg = ConfigurationService.getConfig();
-      expect(cfg.logLevel).toBe('debug');
     });
 
     it('should return overridden showDiffView', () => {

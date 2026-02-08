@@ -19,6 +19,7 @@ A VS Code extension that provides comprehensive test support for the [Spock test
 - **Gradle Integration** — Works with Gradle projects, including multi-module builds (uses init scripts to force test re-execution)
 - **Maven Integration** — Works with Maven projects, including multi-module builds (uses Surefire for test execution and result parsing)
 - **Groovy Language Support** — Contributes Groovy language configuration (brackets, comments, auto-closing pairs)
+- **Re-run Failed Tests** — Dedicated run profile that re-executes only the tests that failed in the previous run
 - **Real-time Updates** — Automatically refreshes the test tree when files change
 - **Error Reporting** — Detailed error messages with file locations for failed tests
 - **Inline Diff View** *(Preview)* — Failed assertions can show expected/actual values in VS Code's rich diff view (opt-in via `showDiffView` setting)
@@ -113,10 +114,8 @@ Workspace
 
 | Command | Title | Description |
 |---|---|---|
-| `spock-test-runner-vscode.runTest` | Run Spock Test | Run all tests in the current file (also in editor context menu) |
-| `spock-test-runner-vscode.runSpecificTest` | Run This Test | Run a single test method |
-| `spock-test-runner-vscode.debugSpecificTest` | Debug This Test | Debug a single test method |
 | `spock-test-runner.reloadTests` | Reload Spock Tests | Re-discover all Spock tests in the workspace |
+| `spock-test-runner.rerunFailedTests` | Re-run Failed Tests | Re-run only the tests that failed in the previous run |
 
 ### Running Tests
 
@@ -124,9 +123,9 @@ Workspace
 |---|---|
 | Run all tests | Click ▶ in the Test Explorer toolbar |
 | Run a single test | Click ▶ next to the test name |
+| Re-run failed tests | `Ctrl+Shift+P` → *Spock Test Runner: Re-run Failed Tests*, or select the **Re-run Failed Tests** profile from the run-profile dropdown |
 | Run with coverage | Click the coverage icon in the Test Explorer toolbar |
-| Command Palette | `Ctrl+Shift+P` → *Run Spock Test* |
-| Context menu | Right-click a `.groovy` file → *Run Spock Test* |
+| Command Palette | `Ctrl+Shift+P` → *Reload Spock Tests* |
 
 ### Debugging Tests
 
@@ -167,8 +166,9 @@ Gradle is checked first. If both `build.gradle` and `pom.xml` exist, Gradle take
 | `spockTestRunner.debugRetries` | `number` | `3` | Number of times to retry attaching the debugger |
 | `spockTestRunner.additionalGradleArgs` | `string[]` | `[]` | Additional CLI arguments passed to every Gradle invocation |
 | `spockTestRunner.additionalMavenArgs` | `string[]` | `[]` | Additional CLI arguments passed to every Maven invocation |
-| `spockTestRunner.logLevel` | `string` | `"info"` | Output channel verbosity (`off`, `error`, `info`, `debug`) |
 | `spockTestRunner.showDiffView` | `boolean` | `false` | *(Preview)* Show expected/actual values in VS Code's inline diff view for failed assertions |
+
+> **Note:** Log level is controlled via VS Code's native Output channel level selector (right-click the Output panel → "Set Log Level").
 
 ## Project Structure
 
@@ -309,6 +309,11 @@ The `.vscode/launch.json` provides:
 | Stale results | Use the *Reload Spock Tests* command from the Command Palette |
 
 Check the **Output** panel → **Spock Test Runner** for detailed logs.
+
+### Future Enhancements
+
+- **Test tag filtering** — Spock annotations are displayed in labels but can't be used to filter/run tests by category.
+- **Additional configuration options** — `javaHome`, `environmentVariables`, `preferredBuildTool`, `coverageExcludes`, `customTestTask`.
 
 ## Contributing
 

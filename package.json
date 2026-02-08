@@ -2,7 +2,7 @@
   "name": "spock-test-runner-vscode-tr",
   "displayName": "Spock Test Runner & Debugger",
   "description": "Run, debug, and measure code coverage of Spock Framework (Groovy) tests using Gradle or Maven, with native VS Code Test Explorer integration",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "copyright": "Copyright 2025 Lukas Zaruba, Copyright 2026 Tomasz Rup",
   "publisher": "TomaszRup",
   "author": "Tomasz Rup",
@@ -34,29 +34,21 @@
   "contributes": {
     "commands": [
       {
-        "command": "spock-test-runner-vscode.runTest",
-        "title": "Run Spock Test"
-      },
-      {
-        "command": "spock-test-runner-vscode.runSpecificTest",
-        "title": "Run This Test"
-      },
-      {
-        "command": "spock-test-runner-vscode.debugSpecificTest",
-        "title": "Debug This Test"
-      },
-      {
         "command": "spock-test-runner.reloadTests",
         "title": "Reload Spock Tests",
         "category": "Spock Test Runner"
+      },
+      {
+        "command": "spock-test-runner.rerunFailedTests",
+        "title": "Re-run Failed Tests",
+        "category": "Spock Test Runner",
+        "icon": "$(testing-rerun-icon)"
       }
     ],
     "menus": {
-      "editor/context": [
+      "commandPalette": [
         {
-          "when": "resourceLangId == groovy",
-          "command": "spock-test-runner-vscode.runTest",
-          "group": "navigation"
+          "command": "spock-test-runner.rerunFailedTests"
         }
       ]
     },
@@ -132,17 +124,6 @@
           "default": [],
           "description": "Additional command-line arguments passed to every Maven invocation (e.g. [\"-Dkey=value\", \"-o\"])."
         },
-        "spockTestRunner.logLevel": {
-          "type": "string",
-          "enum": [
-            "off",
-            "error",
-            "info",
-            "debug"
-          ],
-          "default": "info",
-          "description": "Controls the verbosity of the Spock Test Runner output channel."
-        },
         "spockTestRunner.showDiffView": {
           "type": "boolean",
           "default": false,
@@ -172,5 +153,8 @@
     "eslint": "^8.0.0",
     "typescript": "^5.3.3",
     "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.3.5"
   }
 }

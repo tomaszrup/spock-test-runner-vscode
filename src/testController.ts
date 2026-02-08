@@ -1,4 +1,3 @@
-import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { BuildToolService } from './services/BuildToolService';
@@ -7,11 +6,11 @@ import { TestDiscoveryService } from './services/TestDiscoveryService';
 import { TestExecutionService } from './services/TestExecutionService';
 import { TestResultParser } from './services/TestResultParser';
 import { ConfigurationService } from './services/ConfigurationService';
-import { SpockAnnotation, TestIterationResult, DiffInfo, BuildTool } from './types';
+import { SpockAnnotation, TestData, TestIterationResult, DiffInfo, BuildTool } from './types';
 
 export class SpockTestController {
   private controller: vscode.TestController;
-  private logger: vscode.OutputChannel;
+  private logger: vscode.LogOutputChannel;
   private testData = new WeakMap<vscode.TestItem, TestData>();
   private testExecutionService: TestExecutionService;
   private testResultParser: TestResultParser;
@@ -20,8 +19,12 @@ export class SpockTestController {
   private projectItems = new Map<string, vscode.TestItem>(); // Track root project nodes by root project path
   private subProjectItems = new Map<string, vscode.TestItem>(); // Track subproject nodes by subproject path
   private knownSpecBaseClasses = new Set<string>(); // Workspace-level spec base class names for inheritance resolution
+  private continuousRunTokens = new Set<vscode.CancellationToken>(); // Track active continuous run sessions
+  private continuousRunWatchers: vscode.FileSystemWatcher[] = []; // File watchers for continuous run
+  private lastFailedTests = new Set<string>(); // Track test item IDs that failed in the last run
+  private discoveryInProgress = false; // Guard against concurrent discoverAllTests calls
 
-  constructor(context: vscode.ExtensionContext, logger: vscode.OutputChannel) {
+  constructor(context: vscode.ExtensionContext, logger: vscode.LogOutputChannel) {
     this.logger = logger;
     this.logger.appendLine('SpockTestController: Initializing...');
     
@@ -40,20 +43,6 @@ export class SpockTestController {
     this.createRunProfiles();
     this.registerCommands(context);
 
-    // Add debugging to see if VS Code calls any methods on our controller
-    this.logger.appendLine('SpockTestController: Setting up controller debugging...');
-    
-    // Override the controller's items property to track when it's accessed
-    const originalItems = this.controller.items;
-    Object.defineProperty(this.controller, 'items', {
-      get: () => {
-        this.logger.appendLine('SpockTestController: controller.items accessed');
-        return originalItems;
-      },
-      enumerable: true,
-      configurable: true
-    });
-
     // Automatically discover tests on startup
     this.logger.appendLine('SpockTestController: Starting automatic test discovery...');
     this.discoverAllTests().catch(error => {
@@ -66,17 +55,31 @@ export class SpockTestController {
   private setupTestController(): void {
     this.controller.resolveHandler = async (test) => {
       this.logger.appendLine(`SpockTestController: resolveHandler called with test: ${test ? test.id : 'null'}`);
-      this.logger.appendLine(`SpockTestController: resolveHandler test type: ${test ? typeof test : 'null'}`);
-      this.logger.appendLine(`SpockTestController: resolveHandler test label: ${test ? test.label : 'null'}`);
-      this.logger.appendLine(`SpockTestController: resolveHandler test uri: ${test ? test.uri?.fsPath : 'null'}`);
       
       if (!test) {
         this.logger.appendLine('SpockTestController: Discovering all tests (reload triggered)...');
         await this.discoverAllTests();
       } else {
+        // Skip resolution for project/subproject nodes — they are containers,
+        // not files.  Their children are populated during discoverAllTests.
+        const data = this.testData.get(test);
+        if (data?.type === 'project' || data?.type === 'subproject') {
+          this.logger.appendLine(`SpockTestController: Skipping resolve for ${data.type} node: ${test.label}`);
+          return;
+        }
         this.logger.appendLine(`SpockTestController: Discovering tests in file: ${test.uri?.fsPath}`);
         await this.discoverTestsInFile(test);
       }
+    };
+
+    // Official refresh handler — enables the 🔄 button in the Test Explorer toolbar
+    this.controller.refreshHandler = async (token: vscode.CancellationToken) => {
+      this.logger.appendLine('SpockTestController: refreshHandler triggered (Test Explorer refresh button)');
+      if (token.isCancellationRequested) {
+        return;
+      }
+      await this.discoverAllTests();
+      this.logger.appendLine('SpockTestController: refreshHandler completed');
     };
   }
 
@@ -137,10 +140,11 @@ export class SpockTestController {
     const runProfile = this.controller.createRunProfile(
       'Run',
       vscode.TestRunProfileKind.Run,
-      (request, token) => this.runHandler(false, request, token),
+      (request, token) => this.continuousRunHandler(false, request, token),
       true,
       runnableTag
     );
+    runProfile.supportsContinuousRun = true;
 
     const debugProfile = this.controller.createRunProfile(
       'Debug',
@@ -153,10 +157,11 @@ export class SpockTestController {
     const coverageProfile = this.controller.createRunProfile(
       'Coverage',
       vscode.TestRunProfileKind.Coverage,
-      (request, token) => this.runHandler(false, request, token, true),
+      (request, token) => this.continuousRunHandler(false, request, token, true),
       true,
       runnableTag
     );
+    coverageProfile.supportsContinuousRun = true;
 
     coverageProfile.loadDetailedCoverage = async (_testRun, fileCoverage, _token) => {
       if (fileCoverage instanceof SpockFileCoverage) {
@@ -164,6 +169,14 @@ export class SpockTestController {
       }
       return [];
     };
+
+    this.controller.createRunProfile(
+      'Re-run Failed Tests',
+      vscode.TestRunProfileKind.Run,
+      (request, token) => this.rerunFailedHandler(request, token),
+      false,
+      runnableTag
+    );
   }
 
   private registerCommands(context: vscode.ExtensionContext): void {
@@ -174,19 +187,56 @@ export class SpockTestController {
       this.logger.appendLine('SpockTestController: Manual reload completed');
     });
 
-    // Try to hook into VS Code's test refresh mechanism
-    const refreshCommand = vscode.commands.registerCommand('testing.refreshTests', async () => {
-      this.logger.appendLine('SpockTestController: VS Code refresh command intercepted');
-      await this.discoverAllTests();
-      this.logger.appendLine('SpockTestController: VS Code refresh completed');
+    // Register the "Re-run Failed Tests" command (Command Palette / keybinding)
+    const rerunFailedCommand = vscode.commands.registerCommand('spock-test-runner.rerunFailedTests', async () => {
+      this.logger.appendLine('SpockTestController: Re-run Failed Tests command triggered');
+
+      if (this.lastFailedTests.size === 0) {
+        vscode.window.showInformationMessage('No failed tests to re-run.');
+        return;
+      }
+
+      // Walk the test tree to find items that failed
+      const failedItems: vscode.TestItem[] = [];
+      const findFailedItems = (items: vscode.TestItemCollection) => {
+        items.forEach(item => {
+          if (this.lastFailedTests.has(item.id)) {
+            failedItems.push(item);
+          }
+          if (item.children.size > 0) {
+            findFailedItems(item.children);
+          }
+        });
+      };
+      findFailedItems(this.controller.items);
+
+      if (failedItems.length === 0) {
+        vscode.window.showInformationMessage('Previously failed tests are no longer in the test tree.');
+        return;
+      }
+
+      this.logger.appendLine(`SpockTestController: Re-running ${failedItems.length} failed test(s) via command`);
+      const request = new vscode.TestRunRequest(failedItems, undefined, undefined);
+      const tokenSource = new vscode.CancellationTokenSource();
+      await this.runHandler(false, request, tokenSource.token);
+      tokenSource.dispose();
     });
 
-    context.subscriptions.push(reloadCommand, refreshCommand);
+    context.subscriptions.push(reloadCommand, rerunFailedCommand);
   }
 
   private async discoverAllTests(): Promise<void> {
+    // Guard against concurrent discovery — if a discovery is already in progress,
+    // skip this call.  This prevents race conditions when VS Code's resolveHandler
+    // fires while the initial automatic discovery is still running.
+    if (this.discoveryInProgress) {
+      this.logger.appendLine('SpockTestController: discoverAllTests skipped — already in progress');
+      return;
+    }
+    this.discoveryInProgress = true;
     this.logger.appendLine('SpockTestController: discoverAllTests called');
     
+    try {
     // Clear all existing test items to avoid caching issues
     this.logger.appendLine('SpockTestController: Clearing existing test items...');
     this.controller.items.replace([]);
@@ -235,6 +285,9 @@ export class SpockTestController {
       const fileItem = this.getOrCreateFile(uri);
       this.cleanupIterationItems(fileItem.uri!.toString());
       this.parseTestsInFile(fileItem, content, this.knownSpecBaseClasses);
+    }
+    } finally {
+      this.discoveryInProgress = false;
     }
   }
 
@@ -570,8 +623,173 @@ export class SpockTestController {
     this.logger.appendLine(`SpockTestController: Parsed ${testCount} tests in file: ${file.uri.fsPath}`);
   }
 
+  /**
+   * Handler for run profiles that support continuous run.
+   * When `request.continuous` is true, the tests are re-executed whenever a
+   * `.groovy` file in the workspace changes, until the cancellation token fires.
+   * For normal (non-continuous) requests it delegates directly to `runHandler`.
+   */
+  private async continuousRunHandler(debug: boolean, request: vscode.TestRunRequest, token: vscode.CancellationToken, coverage: boolean = false): Promise<void> {
+    if (!request.continuous) {
+      return this.runHandler(debug, request, token, coverage);
+    }
+
+    this.logger.appendLine('SpockTestController: Continuous run started — tests will re-run on file changes');
+
+    // Run tests once immediately
+    await this.runHandler(debug, request, token, coverage);
+
+    if (token.isCancellationRequested) {
+      return;
+    }
+
+    // Set up file watchers to re-run on .groovy / .java / .gradle / .xml changes
+    const watchers: vscode.FileSystemWatcher[] = [];
+    const patterns = ['**/*.groovy', '**/*.java', '**/build.gradle', '**/build.gradle.kts', '**/pom.xml'];
+
+    // Debounce: avoid re-running many times when multiple files change at once
+    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+    const debounceMs = 1000;
+    let running = false;
+
+    const triggerRun = () => {
+      if (token.isCancellationRequested) {
+        return;
+      }
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
+      debounceTimer = setTimeout(async () => {
+        if (token.isCancellationRequested || running) {
+          return;
+        }
+        running = true;
+        this.logger.appendLine('SpockTestController: Continuous run — file change detected, re-running tests...');
+        try {
+          await this.runHandler(debug, request, token, coverage);
+        } finally {
+          running = false;
+        }
+      }, debounceMs);
+    };
+
+    if (vscode.workspace.workspaceFolders) {
+      for (const folder of vscode.workspace.workspaceFolders) {
+        for (const pattern of patterns) {
+          const watcher = vscode.workspace.createFileSystemWatcher(
+            new vscode.RelativePattern(folder, pattern)
+          );
+          watcher.onDidChange(triggerRun);
+          watcher.onDidCreate(triggerRun);
+          watcher.onDidDelete(triggerRun);
+          watchers.push(watcher);
+        }
+      }
+    }
+
+    // Clean up watchers when cancelled
+    token.onCancellationRequested(() => {
+      this.logger.appendLine('SpockTestController: Continuous run cancelled — disposing file watchers');
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
+      for (const watcher of watchers) {
+        watcher.dispose();
+      }
+    });
+  }
+
+  /**
+   * Wraps a TestRun so that test outcomes are tracked incrementally in
+   * `lastFailedTests`.  A `failed()` call adds the ID; `passed()` and
+   * `skipped()` calls remove it.  This means failures accumulate across
+   * separate runs (e.g. running project-by-project) and are only cleared
+   * when the test actually passes or is skipped.
+   */
+  private createTrackingRun(run: vscode.TestRun): vscode.TestRun {
+    const originalFailed = run.failed.bind(run);
+    const originalPassed = run.passed.bind(run);
+    const originalSkipped = run.skipped.bind(run);
+    const self = this;
+
+    run.failed = function (test: vscode.TestItem, message: vscode.TestMessage | readonly vscode.TestMessage[], duration?: number) {
+      self.lastFailedTests.add(test.id);
+      return originalFailed(test, message, duration);
+    };
+
+    run.passed = function (test: vscode.TestItem, duration?: number) {
+      self.lastFailedTests.delete(test.id);
+      return originalPassed(test, duration);
+    };
+
+    run.skipped = function (test: vscode.TestItem) {
+      self.lastFailedTests.delete(test.id);
+      return originalSkipped(test);
+    };
+
+    return run;
+  }
+
+  /**
+   * Handler for the "Re-run Failed Tests" run profile.
+   * Filters the request to only include tests that failed in the previous run.
+   * If no tests have failed yet, shows an informational message and ends immediately.
+   */
+  private async rerunFailedHandler(request: vscode.TestRunRequest, token: vscode.CancellationToken): Promise<void> {
+    if (this.lastFailedTests.size === 0) {
+      this.logger.appendLine('SpockTestController: Re-run Failed — no failed tests to re-run');
+      vscode.window.showInformationMessage('No failed tests to re-run.');
+      return;
+    }
+
+    this.logger.appendLine(`SpockTestController: Re-run Failed — ${this.lastFailedTests.size} failed test(s) from last run`);
+
+    // Collect the failed TestItem objects from the controller tree
+    const failedItems: vscode.TestItem[] = [];
+    const findFailedItems = (items: vscode.TestItemCollection) => {
+      items.forEach(item => {
+        if (this.lastFailedTests.has(item.id)) {
+          failedItems.push(item);
+        }
+        if (item.children.size > 0) {
+          findFailedItems(item.children);
+        }
+      });
+    };
+
+    if (request.include) {
+      // If the user scoped the request, only re-run failed tests within that scope
+      for (const item of request.include) {
+        if (this.lastFailedTests.has(item.id)) {
+          failedItems.push(item);
+        }
+        if (item.children.size > 0) {
+          findFailedItems(item.children);
+        }
+      }
+    } else {
+      findFailedItems(this.controller.items);
+    }
+
+    if (failedItems.length === 0) {
+      this.logger.appendLine('SpockTestController: Re-run Failed — failed tests no longer exist in tree');
+      vscode.window.showInformationMessage('Previously failed tests are no longer in the test tree.');
+      return;
+    }
+
+    this.logger.appendLine(`SpockTestController: Re-run Failed — re-running ${failedItems.length} test(s)`);
+
+    const filteredRequest = new vscode.TestRunRequest(failedItems, request.exclude, request.profile);
+    return this.runHandler(false, filteredRequest, token);
+  }
+
   private async runHandler(debug: boolean, request: vscode.TestRunRequest, token: vscode.CancellationToken, coverage: boolean = false): Promise<void> {
     const run = this.controller.createTestRun(request);
+
+    // Wrap the run to track failed tests automatically.
+    // Failures are added incrementally; passes/skips remove them.
+    // This preserves failures from earlier runs across different projects.
+    const trackingRun = this.createTrackingRun(run);
 
     this.logger.appendLine(`SpockTestController: runHandler called. debug=${debug}, coverage=${coverage}`);
     this.logger.appendLine(`SpockTestController: request.include=${request.include ? request.include.length + ' items' : 'undefined (run all)'}`);
@@ -628,14 +846,14 @@ export class SpockTestController {
           if (test.tags.some(t => t.id === 'runnable')) {
             leafTests.push({test, data});
           } else {
-            run.skipped(test);
+            trackingRun.skipped(test);
           }
           break;
       }
     }
 
     if (token.isCancellationRequested || leafTests.length === 0) {
-      run.end();
+      trackingRun.end();
       return;
     }
 
@@ -654,13 +872,30 @@ export class SpockTestController {
       groups.get(projectRoot)!.push(item);
     }
 
-    // Phase 3: Execute each group as a single batch
-    for (const [projectRoot, tests] of groups) {
-      if (token.isCancellationRequested) { break; }
-      await this.runBatch(projectRoot, tests, run, debug, token, coverage);
-    }
+    // Phase 3: Execute each group as a single batch — with progress reporting
+    const totalTests = leafTests.length;
+    let completedTests = 0;
 
-    run.end();
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'Running Spock Tests',
+        cancellable: false, // already cancellable via the test run
+      },
+      async (progress) => {
+        progress.report({ message: `0 / ${totalTests} tests`, increment: 0 });
+
+        for (const [projectRoot, tests] of groups) {
+          if (token.isCancellationRequested) { break; }
+          await this.runBatch(projectRoot, tests, trackingRun, debug, token, coverage);
+          completedTests += tests.length;
+          const pct = Math.round((completedTests / totalTests) * 100);
+          progress.report({ message: `${completedTests} / ${totalTests} tests`, increment: pct });
+        }
+      },
+    );
+
+    trackingRun.end();
   }
 
   private async runBatch(
@@ -678,7 +913,8 @@ export class SpockTestController {
 
     // Resolve the root project (where settings.gradle / gradlew or parent pom.xml live)
     // and derive the subproject/module identifier for multi-module builds.
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(projectRoot))
+      ?? vscode.workspace.workspaceFolders?.[0];
     const rootProject = workspaceFolder
       ? BuildToolService.findRootProject(projectRoot, workspaceFolder.uri.fsPath)
       : projectRoot;
@@ -849,16 +1085,20 @@ export class SpockTestController {
 
     // Phase: Attach coverage data if this is a coverage run
     if (coverage) {
-      this.logger.appendLine('SpockTestController: Parsing JaCoCo coverage report...');
-      const xmlPath = this.coverageService.findJacocoXmlReport(projectRoot);
-      if (xmlPath) {
-        const fileCoverages = this.coverageService.parseJacocoReport(xmlPath, projectRoot);
+      this.logger.appendLine('SpockTestController: Parsing JaCoCo coverage reports...');
+      const reports = await this.coverageService.findAllJacocoXmlReports(rootProject);
+      let totalEntries = 0;
+      for (const { xmlPath, projectRoot: projRoot } of reports) {
+        const fileCoverages = await this.coverageService.parseJacocoReport(xmlPath, projRoot);
         for (const fc of fileCoverages) {
           run.addCoverage(fc);
         }
-        this.logger.appendLine(`SpockTestController: Added ${fileCoverages.length} file coverage entries`);
+        totalEntries += fileCoverages.length;
+      }
+      if (totalEntries > 0) {
+        this.logger.appendLine(`SpockTestController: Added ${totalEntries} file coverage entries from ${reports.length} report(s)`);
       } else {
-        this.logger.appendLine('SpockTestController: No JaCoCo XML report found — coverage data unavailable');
+        this.logger.appendLine('SpockTestController: No JaCoCo XML reports found — coverage data unavailable');
       }
     }
   }
@@ -1023,11 +1263,11 @@ export class SpockTestController {
   /**
    * Create flat test items for parameterized test iterations
    */
-  private createFlatIterationItems(
+  private async createFlatIterationItems(
     parentTest: vscode.TestItem, 
     iterationResults: TestIterationResult[], 
     run: vscode.TestRun
-  ): void {
+  ): Promise<void> {
     this.logger.appendLine(`SpockTestController: Creating ${iterationResults.length} flat iteration items`);
     
     // Get the test name from the parent test
@@ -1063,7 +1303,7 @@ export class SpockTestController {
       );
       
       // Set the range to the specific line in the where block for this iteration
-      const iterationRange = this.calculateIterationRange(parentTest, iteration);
+      const iterationRange = await this.calculateIterationRange(parentTest, iteration);
       iterationItem.range = iterationRange;
       
       // Set iteration data
@@ -1109,14 +1349,15 @@ export class SpockTestController {
   /**
    * Calculate the range for a specific iteration in the where block
    */
-  private calculateIterationRange(parentTest: vscode.TestItem, iteration: TestIterationResult): vscode.Range {
+  private async calculateIterationRange(parentTest: vscode.TestItem, iteration: TestIterationResult): Promise<vscode.Range> {
     if (!parentTest.uri) {
       return parentTest.range || new vscode.Range(0, 0, 0, 0);
     }
 
     try {
       // Read the file content to find the where block
-      const content = fs.readFileSync(parentTest.uri.fsPath, 'utf8');
+      const document = await vscode.workspace.openTextDocument(parentTest.uri);
+      const content = document.getText();
       const lines = content.split('\n');
       
       // Find the test method and where block
@@ -1231,12 +1472,4 @@ export class SpockTestController {
     }
     return parts.join(' ');
   }
-}
-
-interface TestData {
-  type: 'project' | 'subproject' | 'file' | 'class' | 'test';
-  className?: string;
-  testName?: string;
-  isDataDriven?: boolean;
-  iterationResults?: TestIterationResult[];
 }
