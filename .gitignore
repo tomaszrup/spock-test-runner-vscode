@@ -9,3 +9,5 @@ sample-project/.gradle
 sample-project/build/
 sample-project/bin/
 coverage/
+**/target/
+**/build/
