@@ -227,10 +227,10 @@ export class TestResultParser {
   }
 
   /**
-   * Parse XML report to get pass/fail results for all tests in a class.
+   * Parse XML report to get pass/fail/skip results for all tests in a class.
    * Returns a map from test name to result.
    */
-  async parseClassTestResults(workspacePath: string, className: string, buildTool: BuildTool = 'gradle'): Promise<Map<string, {success: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}>> {
+  async parseClassTestResults(workspacePath: string, className: string, buildTool: BuildTool = 'gradle'): Promise<Map<string, {success: boolean; skipped: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}>> {
     const testResultsDir = BuildToolService.getTestResultsDir(workspacePath, buildTool);
 
     try {
@@ -254,12 +254,12 @@ export class TestResultParser {
     }
   }
 
-  private parseXmlFileForClassResults(xmlPath: string): Map<string, {success: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}> {
-    const results = new Map<string, {success: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}>();
+  private parseXmlFileForClassResults(xmlPath: string): Map<string, {success: boolean; skipped: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}> {
+    const results = new Map<string, {success: boolean; skipped: boolean; duration: number; errorMessage?: string; diff?: DiffInfo}>();
     const xmlContent = fs.readFileSync(xmlPath, 'utf8');
     this.logger.appendLine(`TestResultParser: Parsing XML for class results: ${xmlPath}`);
 
-    // Match testcase elements - self-closing (passed) and with body (failed/error)
+    // Match testcase elements - self-closing (passed) and with body (failed/error/skipped)
     const testcaseRegex = /<testcase\s+name="([^"]+)"[^>]*time="([^"]*)"[^>]*(?:\/>|>([\s\S]*?)<\/testcase>)/g;
     let match;
 
@@ -270,6 +270,7 @@ export class TestResultParser {
 
       const hasFailed = innerContent.includes('<failure');
       const hasError = innerContent.includes('<error');
+      const hasSkipped = innerContent.includes('<skipped');
 
       let errorMessage: string | undefined;
       let diff: DiffInfo | undefined;
@@ -281,7 +282,7 @@ export class TestResultParser {
         diff = this.parseExpectedActual(errorMessage);
       }
 
-      results.set(testName, { success: !hasFailed && !hasError, duration: time, errorMessage, diff });
+      results.set(testName, { success: !hasFailed && !hasError, skipped: hasSkipped, duration: time, errorMessage, diff });
     }
 
     this.logger.appendLine(`TestResultParser: Found ${results.size} test results in XML`);

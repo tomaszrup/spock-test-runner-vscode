@@ -522,9 +522,29 @@ class AnnotationSpec extends Specification {
       const methods = classes[0].methods;
       expect(methods.length).toBe(6);
 
-      // Check IgnoreRest propagation
+      // Check IgnoreRest propagation — both before and after the annotated method
       const skipped = methods.find(m => m.name === 'this test is skipped because of IgnoreRest');
       expect(skipped?.annotations?.some(a => a.name === 'Ignore')).toBe(true);
+
+      // Methods BEFORE @IgnoreRest should also get synthesized @Ignore
+      const normal = methods.find(m => m.name === 'normal test runs as usual');
+      expect(normal?.annotations?.some(a => a.name === 'Ignore')).toBe(true);
+
+      const pending = methods.find(m => m.name === 'pending feature expected to fail');
+      // Already has @PendingFeature but not @Ignore; should get synthesized @Ignore
+      expect(pending?.annotations?.some(a => a.name === 'Ignore')).toBe(true);
+
+      const timeout = methods.find(m => m.name === 'test with timeout');
+      expect(timeout?.annotations?.some(a => a.name === 'Ignore')).toBe(true);
+
+      // The @IgnoreRest method itself should NOT get synthesized @Ignore
+      const onlyRuns = methods.find(m => m.name === 'only this test runs in the class');
+      expect(onlyRuns?.annotations?.some(a => a.name === 'Ignore')).toBeFalsy();
+      expect(onlyRuns?.annotations?.some(a => a.name === 'IgnoreRest')).toBe(true);
+
+      // Already explicitly @Ignore — should keep its original @Ignore, not get a duplicate
+      const ignored = methods.find(m => m.name === 'this test is ignored');
+      expect(ignored?.annotations?.filter(a => a.name === 'Ignore')).toHaveLength(1);
     });
   });
 });

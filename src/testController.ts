@@ -17,7 +17,8 @@ export class SpockTestController {
   private testResultParser: TestResultParser;
   private coverageService: CoverageService;
   private iterationItems = new Map<string, vscode.TestItem[]>(); // Track iteration items by file URI
-  private projectItems = new Map<string, vscode.TestItem>(); // Track project nodes by project root path
+  private projectItems = new Map<string, vscode.TestItem>(); // Track root project nodes by root project path
+  private subProjectItems = new Map<string, vscode.TestItem>(); // Track subproject nodes by subproject path
   private knownSpecBaseClasses = new Set<string>(); // Workspace-level spec base class names for inheritance resolution
 
   constructor(context: vscode.ExtensionContext, logger: vscode.OutputChannel) {
@@ -106,9 +107,23 @@ export class SpockTestController {
       });
       watcher.onDidDelete(uri => {
         this.logger.appendLine(`SpockTestController: File deleted: ${uri.fsPath}`);
-        // Remove from project nodes
-        for (const [, projectItem] of this.projectItems) {
+        // Remove from subproject nodes first, then project nodes
+        for (const [subPath, subItem] of this.subProjectItems) {
+          subItem.children.delete(uri.toString());
+          if (subItem.children.size === 0) {
+            // Remove empty subproject from its parent project
+            for (const [, projectItem] of this.projectItems) {
+              projectItem.children.delete(subItem.id);
+            }
+            this.subProjectItems.delete(subPath);
+          }
+        }
+        for (const [rootPath, projectItem] of this.projectItems) {
           projectItem.children.delete(uri.toString());
+          if (projectItem.children.size === 0) {
+            this.controller.items.delete(projectItem.id);
+            this.projectItems.delete(rootPath);
+          }
         }
         // Also try top-level removal (fallback files)
         this.controller.items.delete(uri.toString());
@@ -176,6 +191,7 @@ export class SpockTestController {
     this.logger.appendLine('SpockTestController: Clearing existing test items...');
     this.controller.items.replace([]);
     this.projectItems.clear();
+    this.subProjectItems.clear();
     
     if (!vscode.workspace.workspaceFolders) {
       this.logger.appendLine('SpockTestController: No workspace folders found');
@@ -223,18 +239,18 @@ export class SpockTestController {
   }
 
   /**
-   * Get or create a project node for the given Gradle project root.
+   * Get or create a root project node (top-level in test explorer).
    */
-  private getOrCreateProjectNode(projectRoot: string, workspaceFolder: vscode.WorkspaceFolder): vscode.TestItem {
-    const existing = this.projectItems.get(projectRoot);
+  private getOrCreateRootProjectNode(rootProjectPath: string): vscode.TestItem {
+    const existing = this.projectItems.get(rootProjectPath);
     if (existing) {
       return existing;
     }
 
-    const projectName = BuildToolService.getProjectName(projectRoot);
-    const projectUri = vscode.Uri.file(projectRoot);
+    const projectName = BuildToolService.getProjectName(rootProjectPath);
+    const projectUri = vscode.Uri.file(rootProjectPath);
     const projectItem = this.controller.createTestItem(
-      `project:${projectRoot}`,
+      `project:${rootProjectPath}`,
       projectName,
       projectUri
     );
@@ -242,9 +258,37 @@ export class SpockTestController {
     projectItem.tags = [new vscode.TestTag('runnable')];
     this.testData.set(projectItem, { type: 'project' });
     this.controller.items.add(projectItem);
-    this.projectItems.set(projectRoot, projectItem);
-    this.logger.appendLine(`SpockTestController: Created project node: ${projectName} (${projectRoot})`);
+    this.projectItems.set(rootProjectPath, projectItem);
+    this.logger.appendLine(`SpockTestController: Created root project node: ${projectName} (${rootProjectPath})`);
     return projectItem;
+  }
+
+  /**
+   * Get or create a subproject node nested under its root project node.
+   */
+  private getOrCreateSubProjectNode(subProjectPath: string, rootProjectPath: string): vscode.TestItem {
+    const existing = this.subProjectItems.get(subProjectPath);
+    if (existing) {
+      return existing;
+    }
+
+    const subName = BuildToolService.getProjectName(subProjectPath);
+    const subUri = vscode.Uri.file(subProjectPath);
+    const subItem = this.controller.createTestItem(
+      `subproject:${subProjectPath}`,
+      subName,
+      subUri
+    );
+    subItem.canResolveChildren = true;
+    subItem.tags = [new vscode.TestTag('runnable')];
+    this.testData.set(subItem, { type: 'subproject' });
+
+    // Nest under the root project
+    const rootNode = this.getOrCreateRootProjectNode(rootProjectPath);
+    rootNode.children.add(subItem);
+    this.subProjectItems.set(subProjectPath, subItem);
+    this.logger.appendLine(`SpockTestController: Created subproject node: ${subName} under ${rootNode.label} (${subProjectPath})`);
+    return subItem;
   }
 
   private async discoverTestsInFile(file: vscode.TestItem): Promise<void> {
@@ -285,11 +329,17 @@ export class SpockTestController {
       return existing;
     }
 
-    // Also check inside project nodes
+    // Also check inside project nodes and subproject nodes
     for (const [, projectItem] of this.projectItems) {
       const existingInProject = projectItem.children.get(uri.toString());
       if (existingInProject) {
         return existingInProject;
+      }
+    }
+    for (const [, subItem] of this.subProjectItems) {
+      const existingInSub = subItem.children.get(uri.toString());
+      if (existingInSub) {
+        return existingInSub;
       }
     }
 
@@ -298,13 +348,21 @@ export class SpockTestController {
     file.tags = []; // Will be set properly in parseTestsInFile based on content
     this.testData.set(file, { type: 'file' });
 
-    // Find the project root (Gradle or Maven) for this file and nest under it
+    // Find the project root for this file, and determine root vs subproject
     const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
     if (workspaceFolder) {
       const projectRoot = BuildToolService.findProjectRoot(uri.fsPath, workspaceFolder.uri.fsPath);
       if (projectRoot) {
-        const projectNode = this.getOrCreateProjectNode(projectRoot, workspaceFolder);
-        projectNode.children.add(file);
+        const rootProject = BuildToolService.findRootProject(projectRoot, workspaceFolder.uri.fsPath);
+        if (path.resolve(projectRoot) !== path.resolve(rootProject)) {
+          // File is in a subproject — nest under subproject node
+          const subNode = this.getOrCreateSubProjectNode(projectRoot, rootProject);
+          subNode.children.add(file);
+        } else {
+          // File is in the root project directly
+          const rootNode = this.getOrCreateRootProjectNode(rootProject);
+          rootNode.children.add(file);
+        }
         return file;
       }
     }
@@ -475,7 +533,23 @@ export class SpockTestController {
     } else {
       // Remove files with no runnable tests from the tree entirely
       this.logger.appendLine(`[DEBUG] File ${file.uri.fsPath} - Removing from tree (no runnable tests)`);
-      // Remove from parent project node
+      // Remove from subproject nodes
+      for (const [subPath, subItem] of this.subProjectItems) {
+        subItem.children.delete(file.id);
+        if (subItem.children.size === 0) {
+          for (const [rootPath, projectItem] of this.projectItems) {
+            projectItem.children.delete(subItem.id);
+            if (projectItem.children.size === 0) {
+              this.controller.items.delete(projectItem.id);
+              this.projectItems.delete(rootPath);
+              this.logger.appendLine(`[DEBUG] Root project ${projectItem.label} - Removed (empty)`);
+            }
+          }
+          this.subProjectItems.delete(subPath);
+          this.logger.appendLine(`[DEBUG] Subproject ${subItem.label} - Removed (empty)`);
+        }
+      }
+      // Remove from root project nodes
       for (const [projectRoot, projectItem] of this.projectItems) {
         projectItem.children.delete(file.id);
         // If the project node is now empty, remove it too
@@ -534,6 +608,9 @@ export class SpockTestController {
         case 'project':
           test.children.forEach(child => queue.push(child));
           break;
+        case 'subproject':
+          test.children.forEach(child => queue.push(child));
+          break;
         case 'file':
           if (test.children.size === 0) {
             await this.discoverTestsInFile(test);
@@ -544,7 +621,15 @@ export class SpockTestController {
           test.children.forEach(child => queue.push(child));
           break;
         case 'test':
-          leafTests.push({test, data});
+          // Only include runnable tests — skip items without the 'runnable' tag
+          // (e.g. @Ignore, @IgnoreRest-excluded methods).
+          // Explicitly mark non-runnable tests as skipped so they don't retain
+          // stale failure state from a previous run.
+          if (test.tags.some(t => t.id === 'runnable')) {
+            leafTests.push({test, data});
+          } else {
+            run.skipped(test);
+          }
           break;
       }
     }
@@ -727,7 +812,9 @@ export class SpockTestController {
           const xmlResult = xmlResults.get(entry.data.testName);
           if (xmlResult) {
             entry.resolved = true;
-            if (xmlResult.success) {
+            if (xmlResult.skipped) {
+              run.skipped(entry.test);
+            } else if (xmlResult.success) {
               run.passed(entry.test, Date.now() - start);
             } else {
               run.failed(entry.test, this.createTestMessage(xmlResult.errorMessage || 'Test failed', xmlResult.diff), Date.now() - start);
@@ -737,14 +824,25 @@ export class SpockTestController {
       }
     }
 
-    // Final fallback for still-unresolved tests
+    // Final fallback for still-unresolved tests.
+    // If the test was not found in XML results at all, it was likely skipped
+    // by the test framework (e.g. @Requires condition not met, @IgnoreRest).
+    // Only fail a test if we can find errors specifically for its class.
     for (const [key, entry] of testLookup) {
       if (!entry.resolved) {
         if (result.success) {
+          // Overall build passed — safe to assume unresolved tests passed
           run.passed(entry.test, Date.now() - start);
         } else {
-          const errorMessage = this.extractErrorFromOutput(result.output, entry.data.className!, entry.data.testName!);
-          run.failed(entry.test, this.createTestMessage(errorMessage), Date.now() - start);
+          // Overall build failed. Check if there are errors specifically for THIS class.
+          const hasClassError = this.hasErrorForClass(result.output, entry.data.className!);
+          if (hasClassError) {
+            const errorMessage = this.extractErrorFromOutput(result.output, entry.data.className!, entry.data.testName!);
+            run.failed(entry.test, this.createTestMessage(errorMessage), Date.now() - start);
+          } else {
+            // No errors for this class — the test was likely skipped by the framework
+            run.skipped(entry.test);
+          }
         }
       }
     }
@@ -819,6 +917,20 @@ export class SpockTestController {
         run.failed(test, message, Date.now() - Date.now());
       }
     }
+  }
+
+  /**
+   * Check whether the console output contains any error/failure lines for a specific class.
+   */
+  private hasErrorForClass(output: string, className: string): boolean {
+    if (!output) { return false; }
+    const lines = output.split('\n');
+    for (const line of lines) {
+      if (line.includes(className) && (line.includes('FAILED') || line.includes('FAILURE') || line.includes('[ERROR]'))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -1122,7 +1234,7 @@ export class SpockTestController {
 }
 
 interface TestData {
-  type: 'project' | 'file' | 'class' | 'test';
+  type: 'project' | 'subproject' | 'file' | 'class' | 'test';
   className?: string;
   testName?: string;
   isDataDriven?: boolean;

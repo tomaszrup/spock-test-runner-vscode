@@ -199,6 +199,27 @@ export class TestDiscoveryService {
       }
     }
 
+    // Second pass for @IgnoreRest: Spock's @IgnoreRest means "run ONLY this
+    // method, skip ALL others". The first pass only marks methods AFTER the
+    // annotated one; this pass marks methods BEFORE it as well.
+    for (const cls of allClasses) {
+      const hasIgnoreRest = cls.methods.some(m => m.annotations?.some(a => a.name === 'IgnoreRest'));
+      if (hasIgnoreRest) {
+        for (const method of cls.methods) {
+          if (method.annotations?.some(a => a.name === 'IgnoreRest')) {
+            continue; // Don't ignore the @IgnoreRest method itself
+          }
+          const hasExplicitIgnore = method.annotations?.some(a => a.name === 'Ignore');
+          if (!hasExplicitIgnore) {
+            const ignoreAnnotation: SpockAnnotation = { name: 'Ignore', line: method.line, argument: 'via @IgnoreRest' };
+            method.annotations = method.annotations
+              ? [ignoreAnnotation, ...method.annotations]
+              : [ignoreAnnotation];
+          }
+        }
+      }
+    }
+
     // Resolve which classes are actually Spock specs
     return this.filterSpecClasses(allClasses, knownSpecBaseClasses);
   }
