@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: com.example.AnnotationSpec
--------------------------------------------------------------------------------
-Tests run: 8, Failures: 0, Errors: 0, Skipped: 7, Time elapsed: 0.057 s -- in com.example.AnnotationSpec
