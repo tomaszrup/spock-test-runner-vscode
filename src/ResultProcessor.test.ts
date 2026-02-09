@@ -186,10 +186,6 @@ describe('ResultProcessor', () => {
 
       await processor.handleDataDrivenTestResults(test, data, { success: true, output: '' }, run as any, '/ws');
 
-      // createFlatIterationItems is fire-and-forget (not awaited internally),
-      // so flush the microtask queue to let the async work complete.
-      await new Promise(resolve => setTimeout(resolve, 20));
-
       // Iteration items should have been created — verify via run calls
       expect(run.passed).toHaveBeenCalled();
       expect(run.failed).toHaveBeenCalled();

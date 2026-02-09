@@ -55,7 +55,7 @@ export class ResultProcessor {
         data.iterationResults = iterationResults;
         this.testData.set(test, data);
 
-        this.createFlatIterationItems(test, iterationResults, run);
+        await this.createFlatIterationItems(test, iterationResults, run);
       } else {
         this.logger.appendLine('ResultProcessor: No iteration results found, treating as regular test');
         const duration = startTime != null ? Date.now() - startTime : undefined;
