@@ -1,0 +1,300 @@
+import * as vscode from 'vscode';
+import { TestResultParser } from './services/TestResultParser';
+import { IConfigurationService } from './services/ConfigurationService';
+import { extractErrorForTest } from './services/SpockErrorParser';
+import { TestData, TestIterationResult, DiffInfo, BuildTool } from './types';
+
+/**
+ * Processes test execution results: data-driven iteration handling,
+ * iteration TestItem creation, where-block range calculation, and
+ * test message formatting.
+ */
+export class ResultProcessor {
+  /** Cache of document content keyed by URI string to avoid repeated openTextDocument calls. */
+  private documentCache = new Map<string, string>();
+
+  constructor(
+    private controller: vscode.TestController,
+    private logger: vscode.LogOutputChannel,
+    private testResultParser: TestResultParser,
+    private configurationService: IConfigurationService,
+    private testData: WeakMap<vscode.TestItem, TestData>,
+    private iterationItems: Map<string, vscode.TestItem[]>,
+  ) {}
+
+  /** Clear the internal document cache (e.g. between test runs). */
+  clearDocumentCache(): void {
+    this.documentCache.clear();
+  }
+
+  // ── Data-driven test results ───────────────────────────────────────
+
+  async handleDataDrivenTestResults(
+    test: vscode.TestItem,
+    data: TestData,
+    result: any,
+    run: vscode.TestRun,
+    workspacePath: string,
+    buildTool: BuildTool = 'gradle',
+    startTime?: number,
+  ): Promise<void> {
+    this.logger.appendLine(`ResultProcessor: Handling data-driven test results for ${data.className}.${data.testName}`);
+
+    try {
+      const iterationResults = await this.testResultParser.parseTestResults(
+        result.output || '',
+        data.testName!,
+        data.className!,
+        workspacePath,
+        buildTool,
+      );
+
+      if (iterationResults.length > 0) {
+        this.logger.appendLine(`ResultProcessor: Found ${iterationResults.length} iteration results`);
+
+        data.iterationResults = iterationResults;
+        this.testData.set(test, data);
+
+        this.createFlatIterationItems(test, iterationResults, run);
+      } else {
+        this.logger.appendLine('ResultProcessor: No iteration results found, treating as regular test');
+        const duration = startTime != null ? Date.now() - startTime : undefined;
+        if (result.success) {
+          run.passed(test, duration);
+        } else {
+          const errorMessage = extractErrorForTest(result.output || '', data.className!, data.testName!);
+          const message = this.createTestMessage(errorMessage);
+          run.failed(test, message, duration);
+        }
+      }
+    } catch (error) {
+      this.logger.appendLine(`ResultProcessor: Error handling data-driven test results: ${error}`);
+      const duration = startTime != null ? Date.now() - startTime : undefined;
+      if (result.success) {
+        run.passed(test, duration);
+      } else {
+        const errorMessage = extractErrorForTest(result.output || '', data.className!, data.testName!);
+        const message = this.createTestMessage(errorMessage);
+        run.failed(test, message, duration);
+      }
+    }
+  }
+
+  // ── Iteration item creation ────────────────────────────────────────
+
+  async createFlatIterationItems(
+    parentTest: vscode.TestItem,
+    iterationResults: TestIterationResult[],
+    run: vscode.TestRun,
+  ): Promise<void> {
+    this.logger.appendLine(`ResultProcessor: Creating ${iterationResults.length} flat iteration items`);
+
+    const testName = parentTest.label;
+    const className = this.testData.get(parentTest)?.className || 'Unknown';
+    const fileUri = parentTest.uri?.toString() || '';
+
+    // Pre-fetch and cache the document content once for all iterations
+    let cachedContent: string | undefined;
+    if (parentTest.uri) {
+      const uriKey = parentTest.uri.toString();
+      if (this.documentCache.has(uriKey)) {
+        cachedContent = this.documentCache.get(uriKey);
+      } else {
+        try {
+          const document = await vscode.workspace.openTextDocument(parentTest.uri);
+          cachedContent = document.getText();
+          this.documentCache.set(uriKey, cachedContent);
+        } catch (error) {
+          this.logger.appendLine(`ResultProcessor: Error pre-fetching document: ${error}`);
+        }
+      }
+    }
+
+    const sortedResults = iterationResults.sort((a, b) => {
+      if (a.index !== b.index) {
+        return a.index - b.index;
+      }
+      const aParams = Object.values(a.parameters).join(',');
+      const bParams = Object.values(b.parameters).join(',');
+      return aParams.localeCompare(bParams);
+    });
+
+    const newIterationItems: vscode.TestItem[] = [];
+
+    for (const iteration of sortedResults) {
+      const iterationId = `${parentTest.id}#iteration-${iteration.index}`;
+      const iterationLabel = `${testName} [#${iteration.index}] ${this.formatParameters(iteration.parameters)}`;
+
+      const iterationItem = this.controller.createTestItem(
+        iterationId,
+        iterationLabel,
+        parentTest.uri,
+      );
+
+      const iterationRange = await this.calculateIterationRange(parentTest, iteration, cachedContent);
+      iterationItem.range = iterationRange;
+
+      this.testData.set(iterationItem, {
+        type: 'test',
+        className,
+        testName,
+        isDataDriven: false,
+      });
+
+      parentTest.children.add(iterationItem);
+
+      newIterationItems.push(iterationItem);
+
+      if (iteration.success) {
+        run.passed(iterationItem, iteration.duration * 1000);
+      } else {
+        const message = this.createTestMessage(
+          iteration.errorInfo?.error || 'Iteration failed',
+          iteration.errorInfo?.diff,
+        );
+        if (iteration.errorInfo?.location) {
+          message.location = iteration.errorInfo.location;
+        }
+        run.failed(iterationItem, message, iteration.duration * 1000);
+      }
+
+      this.logger.appendLine(`ResultProcessor: Created flat iteration item: ${iterationLabel}`);
+    }
+
+    this.iterationItems.set(fileUri, newIterationItems);
+
+    // Report aggregated result on the parent so it doesn't appear as "skipped"
+    const anyFailed = sortedResults.some(r => !r.success);
+    if (anyFailed) {
+      const failedIteration = sortedResults.find(r => !r.success)!;
+      const message = this.createTestMessage(
+        failedIteration.errorInfo?.error || 'One or more iterations failed',
+        failedIteration.errorInfo?.diff,
+      );
+      run.failed(parentTest, message);
+    } else {
+      run.passed(parentTest);
+    }
+  }
+
+  // ── Where-block range calculation ──────────────────────────────────
+
+  async calculateIterationRange(parentTest: vscode.TestItem, iteration: TestIterationResult, cachedContent?: string): Promise<vscode.Range> {
+    if (!parentTest.uri) {
+      return parentTest.range || new vscode.Range(0, 0, 0, 0);
+    }
+
+    try {
+      let content: string;
+      const uriKey = parentTest.uri.toString();
+      if (cachedContent !== undefined) {
+        content = cachedContent;
+      } else if (this.documentCache.has(uriKey)) {
+        content = this.documentCache.get(uriKey)!;
+      } else {
+        const document = await vscode.workspace.openTextDocument(parentTest.uri);
+        content = document.getText();
+        this.documentCache.set(uriKey, content);
+      }
+      const lines = content.split('\n');
+
+      const testName = parentTest.label;
+      let testMethodLine = -1;
+      let whereBlockLine = -1;
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.includes(`def "${testName}"`) || line.includes(`def ${testName}`)) {
+          testMethodLine = i;
+          break;
+        }
+      }
+
+      if (testMethodLine === -1) {
+        return parentTest.range || new vscode.Range(0, 0, 0, 0);
+      }
+
+      for (let i = testMethodLine; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line === 'where:') {
+          whereBlockLine = i;
+          break;
+        }
+      }
+
+      if (whereBlockLine === -1) {
+        return parentTest.range || new vscode.Range(0, 0, 0, 0);
+      }
+
+      // Detect data-table vs data-pipe syntax
+      let usesDataPipe = false;
+      for (let i = whereBlockLine + 1; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (trimmed === '' || trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('@')) {
+          continue;
+        }
+        usesDataPipe = trimmed.includes('<<');
+        break;
+      }
+
+      const dataRows: number[] = [];
+      let headerSkipped = usesDataPipe;
+      for (let i = whereBlockLine + 1; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (trimmed === '}' || /^(and|then|when|expect|setup|given|cleanup|where|def |@)\s*/.test(trimmed)) {
+          break;
+        }
+        if (trimmed === '' || trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) {
+          continue;
+        }
+        if (!headerSkipped) {
+          headerSkipped = true;
+          continue;
+        }
+        dataRows.push(i);
+      }
+
+      const iterationLine = iteration.index < dataRows.length
+        ? dataRows[iteration.index]
+        : undefined;
+
+      if (iterationLine === undefined || iterationLine >= lines.length) {
+        return parentTest.range || new vscode.Range(0, 0, 0, 0);
+      }
+
+      return new vscode.Range(iterationLine, 0, iterationLine, lines[iterationLine].length);
+    } catch (error) {
+      this.logger.appendLine(`Error calculating iteration range: ${error}`);
+      return parentTest.range || new vscode.Range(0, 0, 0, 0);
+    }
+  }
+
+  // ── Formatting helpers ─────────────────────────────────────────────
+
+  formatParameters(parameters: Record<string, any>): string {
+    const entries = Object.entries(parameters);
+    if (entries.length === 0) {
+      return '';
+    }
+    return entries.map(([key, value]) => `${key}: ${value}`).join(', ');
+  }
+
+  /**
+   * Create a TestMessage, using diff() when expected/actual values are available
+   * so VS Code renders a rich inline diff view.
+   * Gated behind the (Preview) `showDiffView` setting.
+   */
+  createTestMessage(errorText: string, diff?: DiffInfo): vscode.TestMessage {
+    const useDiff = this.configurationService.getConfig().showDiffView;
+    if (useDiff && diff) {
+      return vscode.TestMessage.diff(errorText, diff.expected, diff.actual);
+    }
+    if (useDiff) {
+      const parsed = this.testResultParser.parseExpectedActual(errorText);
+      if (parsed) {
+        return vscode.TestMessage.diff(errorText, parsed.expected, parsed.actual);
+      }
+    }
+    return new vscode.TestMessage(errorText);
+  }
+}

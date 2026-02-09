@@ -28,6 +28,12 @@
     "maven"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "This extension executes build tools (Gradle/Maven) and cannot operate safely in untrusted workspaces."
+    }
+  },
   "activationEvents": [
     "workspaceContains:**/*.groovy"
   ],
@@ -87,7 +93,7 @@
           "default": 5005,
           "minimum": 1,
           "maximum": 65535,
-          "description": "Port number used by the JVM debug agent (JDWP). Must match the port Gradle uses with --debug-jvm."
+          "description": "Port number used by the JVM debug agent (JDWP). Used for both Gradle and Maven debug sessions."
         },
         "spockTestRunner.testTimeout": {
           "type": "number",
@@ -114,7 +120,8 @@
             "type": "string"
           },
           "default": [],
-          "description": "Additional command-line arguments passed to every Gradle invocation (e.g. [\"-Dkey=value\", \"--no-daemon\"])."
+          "description": "Additional command-line arguments passed to every Gradle invocation (e.g. [\"-Dkey=value\", \"--no-daemon\"]).",
+          "restricted": true
         },
         "spockTestRunner.additionalMavenArgs": {
           "type": "array",
@@ -122,12 +129,23 @@
             "type": "string"
           },
           "default": [],
-          "description": "Additional command-line arguments passed to every Maven invocation (e.g. [\"-Dkey=value\", \"-o\"])."
+          "description": "Additional command-line arguments passed to every Maven invocation (e.g. [\"-Dkey=value\", \"-o\"]).",
+          "restricted": true
         },
         "spockTestRunner.showDiffView": {
           "type": "boolean",
           "default": false,
           "description": "(Preview) When enabled, failed assertions show expected/actual values in VS Code's inline diff view. Disable to show plain error messages instead."
+        },
+        "spockTestRunner.testSourcePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/src/test/groovy/**/*.groovy"
+          ],
+          "description": "Glob patterns used to discover Spock test files. Add entries for custom source sets (e.g. \"**/src/integrationTest/groovy/**/*.groovy\")."
         }
       }
     }

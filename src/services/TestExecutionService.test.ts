@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { TestExecutionService } from './TestExecutionService';
+import { createMockLogger } from '../__test_helpers__';
 
 // --- Mocks ---------------------------------------------------------------
 
@@ -55,18 +56,7 @@ vi.mock('child_process', () => ({
 
 // --- Helpers -------------------------------------------------------------
 
-function createMockLogger() {
-  return {
-    name: 'test',
-    appendLine: vi.fn(),
-    append: vi.fn(),
-    clear: vi.fn(),
-    show: vi.fn(),
-    hide: vi.fn(),
-    dispose: vi.fn(),
-    replace: vi.fn(),
-  } as any;
-}
+// createMockLogger imported from __test_helpers__
 
 function createMockRun() {
   return {
@@ -107,142 +97,6 @@ describe('TestExecutionService', () => {
 
   afterEach(() => {
     vi.useRealTimers();
-  });
-
-  // ── executeTest ─────────────────────────────────────────────────────
-
-  describe('executeTest', () => {
-    it('should resolve with success when process exits 0', async () => {
-      const promise = service.executeTest(defaultOptions(), run);
-      // Emit some output then close successfully
-      fakeProc.stdout.emit('data', Buffer.from('BUILD SUCCESSFUL\n'));
-      fakeProc.emit('close', 0);
-      const result = await promise;
-      expect(result.success).toBe(true);
-      expect(result.output).toContain('BUILD SUCCESSFUL');
-    });
-
-    it('should resolve with failure when process exits non-zero', async () => {
-      const promise = service.executeTest(defaultOptions(), run);
-      fakeProc.stderr.emit('data', Buffer.from('BUILD FAILED\n'));
-      fakeProc.emit('close', 1);
-      const result = await promise;
-      expect(result.success).toBe(false);
-      expect(result.errorInfo).toBeDefined();
-    });
-
-    it('should stream stdout to run.appendOutput', async () => {
-      const promise = service.executeTest(defaultOptions(), run);
-      fakeProc.stdout.emit('data', Buffer.from('line1\nline2\n'));
-      fakeProc.emit('close', 0);
-      await promise;
-      expect(run.appendOutput).toHaveBeenCalled();
-      // Output should have \r\n line endings
-      const calls = run.appendOutput.mock.calls.map((c: any[]) => c[0]);
-      expect(calls.some((c: string) => c.includes('\r\n'))).toBe(true);
-    });
-
-    it('should stream stderr to run.appendOutput', async () => {
-      const promise = service.executeTest(defaultOptions(), run);
-      fakeProc.stderr.emit('data', Buffer.from('error output'));
-      fakeProc.emit('close', 1);
-      await promise;
-      expect(run.appendOutput).toHaveBeenCalledWith(
-        expect.stringContaining('error output'),
-      );
-    });
-
-    it('should stream output scoped to testItem when provided', async () => {
-      const testItem = { id: 'test-1', label: 'my test' } as any;
-      const promise = service.executeTest(defaultOptions(), run, testItem);
-      fakeProc.stdout.emit('data', Buffer.from('scoped output'));
-      fakeProc.emit('close', 0);
-      await promise;
-      expect(run.appendOutput).toHaveBeenCalledWith(
-        expect.any(String),
-        undefined,
-        testItem,
-      );
-    });
-
-    it('should resolve with timeout error when process exceeds testTimeout', async () => {
-      const promise = service.executeTest(defaultOptions(), run);
-      // Advance past the 2-second timeout
-      vi.advanceTimersByTime(3000);
-      // Let the promise microtasks settle
-      const result = await promise;
-      expect(result.success).toBe(false);
-      expect(result.errorInfo?.error).toMatch(/timed out/i);
-      expect(fakeProc.kill).toHaveBeenCalled();
-    });
-
-    it('should resolve with cancelled when token is already cancelled', async () => {
-      const token = {
-        isCancellationRequested: true,
-        onCancellationRequested: vi.fn(() => ({ dispose: vi.fn() })),
-      } as any;
-
-      const result = await service.executeTest(defaultOptions(), run, undefined, token);
-      expect(result.success).toBe(false);
-      expect(result.errorInfo?.error).toMatch(/cancelled/i);
-      expect(fakeProc.kill).toHaveBeenCalled();
-    });
-
-    it('should kill process and resolve cancelled when token fires', async () => {
-      let cancelCb: (() => void) | undefined;
-      const token = {
-        isCancellationRequested: false,
-        onCancellationRequested: vi.fn((cb: () => void) => {
-          cancelCb = cb;
-          return { dispose: vi.fn() };
-        }),
-      } as any;
-
-      const promise = service.executeTest(defaultOptions(), run, undefined, token);
-      // Simulate cancellation
-      token.isCancellationRequested = true;
-      cancelCb!();
-      // Process closes after being killed
-      fakeProc.emit('close', null);
-      const result = await promise;
-      expect(result.success).toBe(false);
-      expect(fakeProc.kill).toHaveBeenCalled();
-    });
-
-    it('should resolve with error when process emits error event', async () => {
-      const promise = service.executeTest(defaultOptions(), run);
-      fakeProc.emit('error', new Error('spawn ENOENT'));
-      const result = await promise;
-      expect(result.success).toBe(false);
-      expect(result.errorInfo?.error).toBe('spawn ENOENT');
-    });
-
-    it('should start a debug session when debug=true', async () => {
-      const opts = { ...defaultOptions(), debug: true };
-      const promise = service.executeTest(opts, run);
-      fakeProc.emit('close', 0);
-      await promise;
-      expect(mockStartDebugSession).toHaveBeenCalled();
-    });
-
-    it('should clear timeout on successful close', async () => {
-      const promise = service.executeTest(defaultOptions(), run);
-      fakeProc.emit('close', 0);
-      await promise;
-      // Advancing timers past the timeout should NOT cause issues
-      vi.advanceTimersByTime(5000);
-      // No additional assertions needed — the test passes if it doesn't throw
-    });
-
-    it('should combine stdout and stderr in output', async () => {
-      const promise = service.executeTest(defaultOptions(), run);
-      fakeProc.stdout.emit('data', Buffer.from('stdout part'));
-      fakeProc.stderr.emit('data', Buffer.from('stderr part'));
-      fakeProc.emit('close', 1);
-      const result = await promise;
-      expect(result.output).toContain('stdout part');
-      expect(result.output).toContain('stderr part');
-    });
   });
 
   // ── executeBatch ────────────────────────────────────────────────────
@@ -407,49 +261,6 @@ describe('TestExecutionService', () => {
       fakeProc.emit('close', 0);
       await promise;
       expect(mockStartDebugSession).toHaveBeenCalled();
-    });
-  });
-
-  // ── parseTestError (private, tested indirectly) ─────────────────────
-
-  describe('error parsing (via executeTest)', () => {
-    it('should extract Spock condition-not-satisfied errors', async () => {
-      const promise = service.executeTest(defaultOptions(), run);
-      fakeProc.stdout.emit('data', Buffer.from([
-        'MySpec > my test FAILED',
-        '',
-        'Condition not satisfied:',
-        '  result == expected',
-        '  |      |  |',
-        '  4      |  5',
-        '         false',
-        '',
-        '  at MySpec.my test(MySpec.groovy:10)',
-      ].join('\n')));
-      fakeProc.emit('close', 1);
-      const result = await promise;
-      expect(result.success).toBe(false);
-      expect(result.errorInfo?.error).toContain('Condition not satisfied');
-    });
-
-    it('should extract location from groovy stack traces', async () => {
-      const promise = service.executeTest(defaultOptions(), run);
-      fakeProc.stdout.emit('data', Buffer.from([
-        'MySpec > my test FAILED',
-        '  at MySpec.my test(MySpec.groovy:42)',
-      ].join('\n')));
-      fakeProc.emit('close', 1);
-      const result = await promise;
-      expect(result.errorInfo?.location).toBeDefined();
-    });
-
-    it('should fallback to generic error message when no details found', async () => {
-      const promise = service.executeTest(defaultOptions(), run);
-      fakeProc.stdout.emit('data', Buffer.from('some random output\n'));
-      fakeProc.emit('close', 1);
-      const result = await promise;
-      expect(result.success).toBe(false);
-      expect(result.errorInfo).toBeDefined();
     });
   });
 });

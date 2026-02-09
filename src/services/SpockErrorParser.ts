@@ -1,0 +1,209 @@
+/**
+ * Centralised Spock/Groovy error-parsing utilities.
+ *
+ * Both TestExecutionService (single-test error parsing) and the test controller's
+ * fallback error extraction share nearly identical logic for capturing Spock
+ * "Condition not satisfied" blocks, stack traces, and failure lines.
+ * This module de-duplicates that logic into reusable functions.
+ */
+
+import * as path from 'path';
+import * as vscode from 'vscode';
+import { DiffInfo } from '../types';
+
+// ── Types ────────────────────────────────────────────────────────────────
+
+export interface ParsedTestError {
+  error: string;
+  location?: vscode.Location;
+  diff?: DiffInfo;
+}
+
+// ── Public API ───────────────────────────────────────────────────────────
+
+/**
+ * Parse a full build output to extract a structured error for a single test run.
+ * Used by TestExecutionService after a process exits with non-zero code.
+ *
+ * Returns `undefined` when the output contains no recognizable error pattern.
+ */
+export function parseTestError(output: string): ParsedTestError | undefined {
+  const lines = output.split('\n');
+  let errorMessage = 'Test execution failed';
+  let location: vscode.Location | undefined;
+  const stackTraceLines: string[] = [];
+  let capturingStackTrace = false;
+  let conditionBlock: string[] = [];
+  let capturingCondition = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (line.includes('FAILED') && (line.includes('Test') || line.includes('Spec'))) {
+      errorMessage = line.trim();
+    }
+
+    // Capture Spock condition-not-satisfied blocks (the power assert output)
+    if (line.includes('Condition not satisfied:') || line.includes('Assertion failed:')) {
+      capturingCondition = true;
+      conditionBlock = [line.trim()];
+      continue;
+    }
+    if (capturingCondition) {
+      // Condition blocks are indented; stop at a blank or non-indented line
+      if (line.match(/^\s+/) && !line.trim().startsWith('at ')) {
+        conditionBlock.push(line.trimEnd());
+        continue;
+      } else {
+        capturingCondition = false;
+      }
+    }
+
+    // Capture stack trace lines
+    if (line.trim().startsWith('at ')) {
+      capturingStackTrace = true;
+      stackTraceLines.push(line.trim());
+    } else if (capturingStackTrace && (line.trim().startsWith('Caused by:') || line.trim().startsWith('...'))) {
+      stackTraceLines.push(line.trim());
+    } else if (capturingStackTrace && line.trim() === '') {
+      // Allow blank lines within stack traces
+    } else {
+      capturingStackTrace = false;
+    }
+
+    // Capture exception lines
+    if (line.includes('spock.lang.Specification') || line.includes('groovy.lang.MissingMethodException')) {
+      errorMessage = line.trim();
+    }
+    if (line.includes('Exception') || line.includes('Error:')) {
+      if (!line.includes('BUILD') && !line.includes('> Task')) {
+        stackTraceLines.push(line.trim());
+      }
+    }
+
+    // Extract location from stack trace
+    if (line.includes('.groovy:') && line.includes('at ') && !location) {
+      const match = line.match(/at\s+.*\((.+\.groovy):(\d+)\)/);
+      if (match) {
+        const filePath = match[1];
+        const lineNumber = parseInt(match[2]) - 1;
+
+        try {
+          const uri = vscode.Uri.file(path.resolve(filePath));
+          location = new vscode.Location(uri, new vscode.Position(lineNumber, 0));
+        } catch {
+          // Ignore if file path is invalid
+        }
+      }
+    }
+  }
+
+  if (errorMessage === 'Test execution failed') {
+    for (const line of lines) {
+      if (line.includes('Exception') || line.includes('Error') || line.includes('failed')) {
+        errorMessage = line.trim();
+        break;
+      }
+    }
+  }
+
+  // Build a comprehensive error message with condition block and stack trace
+  const parts: string[] = [];
+  if (conditionBlock.length > 0) {
+    parts.push(conditionBlock.join('\n'));
+  } else {
+    parts.push(errorMessage);
+  }
+  if (stackTraceLines.length > 0) {
+    parts.push('');
+    parts.push('Stack trace:');
+    parts.push(stackTraceLines.join('\n'));
+  }
+
+  const fullError = parts.join('\n');
+  return { error: fullError, location };
+}
+
+/**
+ * Extract meaningful error information from console output for a specific
+ * class / test.  Used as a fallback when XML result reports are unavailable.
+ *
+ * Looks for Spock assertion blocks, exception messages, and stack traces
+ * that mention the given class or test name.
+ */
+export function extractErrorForTest(output: string, className: string, testName: string): string {
+  if (!output) {
+    return 'Test failed';
+  }
+
+  const lines = output.split('\n');
+  const parts: string[] = [];
+  let conditionBlock: string[] = [];
+  let capturingCondition = false;
+  const stackTraceLines: string[] = [];
+  let foundRelevantFailure = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Detect the FAILED line for our specific test
+    if (line.includes('FAILED') && (line.includes(className) || line.includes(testName))) {
+      foundRelevantFailure = true;
+    }
+
+    // Capture Spock "Condition not satisfied" / "Assertion failed" blocks
+    if (line.includes('Condition not satisfied:') || line.includes('Assertion failed:')) {
+      capturingCondition = true;
+      conditionBlock = [line.trim()];
+      continue;
+    }
+    if (capturingCondition) {
+      if (line.match(/^\s+/) && !line.trim().startsWith('at ')) {
+        conditionBlock.push(line.trimEnd());
+        continue;
+      } else {
+        capturingCondition = false;
+      }
+    }
+
+    // Capture stack trace lines from test code (not Gradle internals)
+    if (line.trim().startsWith('at ') && line.includes('.groovy:')) {
+      stackTraceLines.push(line.trim());
+    }
+  }
+
+  // Build the error message
+  if (conditionBlock.length > 0) {
+    parts.push(conditionBlock.join('\n'));
+  }
+  if (stackTraceLines.length > 0) {
+    if (parts.length > 0) { parts.push(''); }
+    parts.push(stackTraceLines.join('\n'));
+  }
+
+  if (parts.length > 0) {
+    return parts.join('\n');
+  }
+
+  // If we found a FAILED line but couldn't extract details, report that
+  if (foundRelevantFailure) {
+    return `${className}.${testName} FAILED (see console output for details)`;
+  }
+
+  return 'Test failed';
+}
+
+/**
+ * Check whether the console output contains any error/failure lines for a
+ * specific class.
+ */
+export function hasErrorForClass(output: string, className: string): boolean {
+  if (!output) { return false; }
+  const lines = output.split('\n');
+  for (const line of lines) {
+    if (line.includes(className) && (line.includes('FAILED') || line.includes('FAILURE') || line.includes('[ERROR]'))) {
+      return true;
+    }
+  }
+  return false;
+}

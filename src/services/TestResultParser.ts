@@ -922,32 +922,37 @@ export class TestResultParser {
   }
 
   /**
-   * Extract parameters from unrolled test names like "maximum of 1 and 3 is 3"
-   * This is a best-effort attempt to extract meaningful data
+   * Extract parameters from unrolled test names by tokenising the name into
+   * non-numeric "words" and numeric / boolean values.  Every detected literal
+   * is stored under a positional key (param0, param1, …).  This is entirely
+   * generic — no sample-project-specific patterns are needed.
    */
   private extractParametersFromUnrolledName(unrolledName: string): Record<string, any> {
+    // Match tokens that look like values: integers, decimals, booleans,
+    // single-quoted strings, or double-quoted strings.
+    const tokenRegex = /(?<![\w#])(-?\d+(?:\.\d+)?|true|false|'[^']*'|"[^"]*")(?!\w)/g;
     const parameters: Record<string, any> = {};
-    
-    // Try to extract parameters from patterns like "maximum of 1 and 3 is 3"
-    const maxMatch = unrolledName.match(/^maximum of (\d+) and (\d+) is (\d+)$/);
-    if (maxMatch) {
-      parameters['a'] = parseInt(maxMatch[1]);
-      parameters['b'] = parseInt(maxMatch[2]);
-      parameters['c'] = parseInt(maxMatch[3]);
+    let match: RegExpExecArray | null;
+    let index = 0;
+
+    while ((match = tokenRegex.exec(unrolledName)) !== null) {
+      let value: any = match[1];
+      // Strip surrounding quotes
+      if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"'))) {
+        value = value.slice(1, -1);
+      } else if (value === 'true' || value === 'false') {
+        value = value === 'true';
+      } else if (!isNaN(Number(value)) && value !== '') {
+        value = Number(value);
+      }
+      parameters[`param${index++}`] = value;
     }
-    
-    // Try to extract name and age from patterns like "Alice is 25 years old"
-    const nameAgeMatch = unrolledName.match(/^([^0-9]+?)\s+is\s+(\d+)\s+years\s+old$/);
-    if (nameAgeMatch) {
-      parameters['name'] = nameAgeMatch[1].trim();
-      parameters['age'] = parseInt(nameAgeMatch[2]);
-    }
-    
-    // If no specific pattern matches, store the whole name as a parameter
-    if (Object.keys(parameters).length === 0) {
+
+    // Fallback: store the whole name so callers always get something
+    if (index === 0) {
       parameters['unrolledName'] = unrolledName;
     }
-    
+
     return parameters;
   }
 }

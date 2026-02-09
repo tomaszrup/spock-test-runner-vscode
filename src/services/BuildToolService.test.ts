@@ -28,73 +28,73 @@ describe('BuildToolService', () => {
   // ── detectBuildTool ────────────────────────────────────────────────
 
   describe('detectBuildTool', () => {
-    it('should detect Gradle project with build.gradle', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
-        return String(p).endsWith('build.gradle');
+    it('should detect Gradle project with build.gradle', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (!String(p).endsWith('build.gradle')) throw new Error('ENOENT');
       });
-      expect(BuildToolService.detectBuildTool('/project')).toBe('gradle');
+      expect(await BuildToolService.detectBuildTool('/project')).toBe('gradle');
     });
 
-    it('should detect Gradle project with build.gradle.kts', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
-        return String(p).endsWith('build.gradle.kts');
+    it('should detect Gradle project with build.gradle.kts', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (!String(p).endsWith('build.gradle.kts')) throw new Error('ENOENT');
       });
-      expect(BuildToolService.detectBuildTool('/project')).toBe('gradle');
+      expect(await BuildToolService.detectBuildTool('/project')).toBe('gradle');
     });
 
-    it('should detect Maven project with pom.xml', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
-        return String(p).endsWith('pom.xml');
+    it('should detect Maven project with pom.xml', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (!String(p).endsWith('pom.xml')) throw new Error('ENOENT');
       });
-      expect(BuildToolService.detectBuildTool('/project')).toBe('maven');
+      expect(await BuildToolService.detectBuildTool('/project')).toBe('maven');
     });
 
-    it('should prefer Gradle over Maven when both exist', () => {
-      mockedFs.existsSync.mockReturnValue(true);
-      expect(BuildToolService.detectBuildTool('/project')).toBe('gradle');
+    it('should prefer Gradle over Maven when both exist', async () => {
+      mockedFs.promises.access.mockResolvedValue(undefined);
+      expect(await BuildToolService.detectBuildTool('/project')).toBe('gradle');
     });
 
-    it('should return null if no build file found', () => {
-      mockedFs.existsSync.mockReturnValue(false);
-      expect(BuildToolService.detectBuildTool('/project')).toBeNull();
+    it('should return null if no build file found', async () => {
+      mockedFs.promises.access.mockRejectedValue(new Error('ENOENT'));
+      expect(await BuildToolService.detectBuildTool('/project')).toBeNull();
     });
   });
 
   // ── isGradleProject ───────────────────────────────────────────────
 
   describe('isGradleProject', () => {
-    it('should return true when build.gradle exists', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) =>
-        String(p).endsWith('build.gradle')
-      );
-      expect(BuildToolService.isGradleProject('/my-project')).toBe(true);
+    it('should return true when build.gradle exists', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (!String(p).endsWith('build.gradle')) throw new Error('ENOENT');
+      });
+      expect(await BuildToolService.isGradleProject('/my-project')).toBe(true);
     });
 
-    it('should return true when build.gradle.kts exists', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) =>
-        String(p).endsWith('build.gradle.kts')
-      );
-      expect(BuildToolService.isGradleProject('/my-project')).toBe(true);
+    it('should return true when build.gradle.kts exists', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (!String(p).endsWith('build.gradle.kts')) throw new Error('ENOENT');
+      });
+      expect(await BuildToolService.isGradleProject('/my-project')).toBe(true);
     });
 
-    it('should return false when neither exists', () => {
-      mockedFs.existsSync.mockReturnValue(false);
-      expect(BuildToolService.isGradleProject('/my-project')).toBe(false);
+    it('should return false when neither exists', async () => {
+      mockedFs.promises.access.mockRejectedValue(new Error('ENOENT'));
+      expect(await BuildToolService.isGradleProject('/my-project')).toBe(false);
     });
   });
 
   // ── findGradleProjectRoot ─────────────────────────────────────────
 
   describe('findGradleProjectRoot', () => {
-    it('should find project root at file directory level', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) =>
-        String(p) === path.join('/workspace/project', 'build.gradle')
-      );
-      mockedFs.statSync.mockImplementation(() => {
+    it('should find project root at file directory level', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (String(p) !== path.join('/workspace/project', 'build.gradle')) throw new Error('ENOENT');
+      });
+      mockedFs.promises.stat.mockImplementation(async () => {
         throw new Error('Not a directory');
       });
 
-      const result = BuildToolService.findGradleProjectRoot(
+      const result = await BuildToolService.findGradleProjectRoot(
         '/workspace/project/src/test/Spec.groovy',
         '/workspace'
       );
@@ -102,13 +102,13 @@ describe('BuildToolService', () => {
       expect(result).not.toBeNull();
     });
 
-    it('should return null when no gradle files exist in hierarchy', () => {
-      mockedFs.existsSync.mockReturnValue(false);
-      mockedFs.statSync.mockImplementation(() => {
+    it('should return null when no gradle files exist in hierarchy', async () => {
+      mockedFs.promises.access.mockRejectedValue(new Error('ENOENT'));
+      mockedFs.promises.stat.mockImplementation(async () => {
         throw new Error('nope');
       });
 
-      const result = BuildToolService.findGradleProjectRoot(
+      const result = await BuildToolService.findGradleProjectRoot(
         '/workspace/src/test/Spec.groovy',
         '/workspace'
       );
@@ -119,32 +119,32 @@ describe('BuildToolService', () => {
   // ── findGradleRootProject ─────────────────────────────────────────
 
   describe('findGradleRootProject', () => {
-    it('should find root project with settings.gradle', () => {
+    it('should find root project with settings.gradle', async () => {
       const wsRoot = path.resolve('/workspace');
       const subDir = path.join(wsRoot, 'subproject');
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) =>
-        String(p) === path.join(wsRoot, 'settings.gradle')
-      );
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (String(p) !== path.join(wsRoot, 'settings.gradle')) throw new Error('ENOENT');
+      });
 
-      const result = BuildToolService.findGradleRootProject(subDir, wsRoot);
+      const result = await BuildToolService.findGradleRootProject(subDir, wsRoot);
       expect(result).toBe(wsRoot);
     });
 
-    it('should find root project with settings.gradle.kts', () => {
+    it('should find root project with settings.gradle.kts', async () => {
       const wsRoot = path.resolve('/workspace');
       const subDir = path.join(wsRoot, 'subproject');
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) =>
-        String(p) === path.join(wsRoot, 'settings.gradle.kts')
-      );
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (String(p) !== path.join(wsRoot, 'settings.gradle.kts')) throw new Error('ENOENT');
+      });
 
-      const result = BuildToolService.findGradleRootProject(subDir, wsRoot);
+      const result = await BuildToolService.findGradleRootProject(subDir, wsRoot);
       expect(result).toBe(wsRoot);
     });
 
-    it('should return original project path when no settings file found', () => {
-      mockedFs.existsSync.mockReturnValue(false);
+    it('should return original project path when no settings file found', async () => {
+      mockedFs.promises.access.mockRejectedValue(new Error('ENOENT'));
 
-      const result = BuildToolService.findGradleRootProject(
+      const result = await BuildToolService.findGradleRootProject(
         '/workspace/subproject',
         '/workspace'
       );
@@ -176,21 +176,43 @@ describe('BuildToolService', () => {
   // ── getProjectName ────────────────────────────────────────────────
 
   describe('getProjectName', () => {
-    it('should extract rootProject.name from build.gradle', () => {
-      mockedFs.existsSync.mockReturnValue(true);
-      mockedFs.readFileSync.mockReturnValue("rootProject.name = 'my-app'");
-      expect(BuildToolService.getProjectName('/project')).toBe('my-app');
+    it('should extract rootProject.name from settings.gradle', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (String(p).endsWith('settings.gradle')) return;
+        throw new Error('ENOENT');
+      });
+      mockedFs.promises.readFile.mockResolvedValue("rootProject.name = 'from-settings'");
+      expect(await BuildToolService.getProjectName('/project')).toBe('from-settings');
     });
 
-    it('should extract name = from build.gradle', () => {
-      mockedFs.existsSync.mockReturnValue(true);
-      mockedFs.readFileSync.mockReturnValue('name = "my-lib"');
-      expect(BuildToolService.getProjectName('/project')).toBe('my-lib');
+    it('should prefer settings.gradle over build.gradle for project name', async () => {
+      mockedFs.promises.access.mockResolvedValue(undefined);
+      mockedFs.promises.readFile.mockImplementation(async (p: any) => {
+        if (String(p).endsWith('settings.gradle')) return "rootProject.name = 'settings-name'";
+        return "rootProject.name = 'build-name'";
+      });
+      expect(await BuildToolService.getProjectName('/project')).toBe('settings-name');
     });
 
-    it('should fallback to directory name', () => {
-      mockedFs.existsSync.mockReturnValue(false);
-      const result = BuildToolService.getProjectName('/workspace/my-project');
+    it('should extract rootProject.name from build.gradle', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (String(p).endsWith('settings.gradle') || String(p).endsWith('settings.gradle.kts')) throw new Error('ENOENT');
+      });
+      mockedFs.promises.readFile.mockResolvedValue("rootProject.name = 'my-app'");
+      expect(await BuildToolService.getProjectName('/project')).toBe('my-app');
+    });
+
+    it('should extract name = from build.gradle', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (String(p).endsWith('settings.gradle') || String(p).endsWith('settings.gradle.kts')) throw new Error('ENOENT');
+      });
+      mockedFs.promises.readFile.mockResolvedValue('name = "my-lib"');
+      expect(await BuildToolService.getProjectName('/project')).toBe('my-lib');
+    });
+
+    it('should fallback to directory name', async () => {
+      mockedFs.promises.access.mockRejectedValue(new Error('ENOENT'));
+      const result = await BuildToolService.getProjectName('/workspace/my-project');
       expect(result).toBe('my-project');
     });
   });
@@ -200,40 +222,40 @@ describe('BuildToolService', () => {
   describe('buildCommandArgs', () => {
     beforeEach(() => {
       // hasGradleWrapper will check for gradlew
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
         const s = String(p);
-        if (s.endsWith('gradlew') || s.endsWith('gradlew.bat')) {return true;}
-        if (s.endsWith('force-tests.init.gradle')) {return true;}
-        return false;
+        if (s.endsWith('gradlew') || s.endsWith('gradlew.bat')) return;
+        if (s.endsWith('force-tests.init.gradle')) return;
+        throw new Error('ENOENT');
       });
     });
 
-    it('should build basic test command', () => {
-      const args = BuildToolService.buildCommandArgs('MySpec', false, '/project');
+    it('should build basic test command', async () => {
+      const args = await BuildToolService.buildCommandArgs('MySpec', false, '/project');
       expect(args[0]).toMatch(/gradlew/);
       expect(args).toContain('test');
       expect(args).toContain('--tests');
-      expect(args).toContain('MySpec');
+      expect(args.some(a => a.includes('MySpec'))).toBe(true);
       expect(args).toContain('--stacktrace');
     });
 
-    it('should include --debug-jvm when debug is true', () => {
-      const args = BuildToolService.buildCommandArgs('MySpec', true, '/project');
+    it('should include --debug-jvm when debug is true', async () => {
+      const args = await BuildToolService.buildCommandArgs('MySpec', true, '/project');
       expect(args).toContain('--debug-jvm');
     });
 
-    it('should not include --debug-jvm when debug is false', () => {
-      const args = BuildToolService.buildCommandArgs('MySpec', false, '/project');
+    it('should not include --debug-jvm when debug is false', async () => {
+      const args = await BuildToolService.buildCommandArgs('MySpec', false, '/project');
       expect(args).not.toContain('--debug-jvm');
     });
 
-    it('should include --init-script argument', () => {
-      const args = BuildToolService.buildCommandArgs('MySpec', false, '/project');
+    it('should include --init-script argument', async () => {
+      const args = await BuildToolService.buildCommandArgs('MySpec', false, '/project');
       expect(args).toContain('--init-script');
     });
 
-    it('should use subproject prefix when provided', () => {
-      const args = BuildToolService.buildCommandArgs('MySpec', false, '/project', undefined, ':submodule');
+    it('should use subproject prefix when provided', async () => {
+      const args = await BuildToolService.buildCommandArgs('MySpec', false, '/project', undefined, ':submodule');
       expect(args).toContain(':submodule:test');
     });
   });
@@ -242,17 +264,17 @@ describe('BuildToolService', () => {
 
   describe('buildBatchCommandArgs', () => {
     beforeEach(() => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
         const s = String(p);
-        if (s.endsWith('gradlew') || s.endsWith('gradlew.bat')) {return true;}
-        if (s.endsWith('force-tests.init.gradle')) {return true;}
-        if (s.endsWith('coverage.init.gradle')) {return true;}
-        return false;
+        if (s.endsWith('gradlew') || s.endsWith('gradlew.bat')) return;
+        if (s.endsWith('force-tests.init.gradle')) return;
+        if (s.endsWith('coverage.init.gradle')) return;
+        throw new Error('ENOENT');
       });
     });
 
-    it('should build batch command with multiple test filters', () => {
-      const args = BuildToolService.buildBatchCommandArgs(
+    it('should build batch command with multiple test filters', async () => {
+      const args = await BuildToolService.buildBatchCommandArgs(
         ['TestA', 'TestB'],
         false,
         '/project'
@@ -262,8 +284,8 @@ describe('BuildToolService', () => {
       expect(testsFlags.length).toBe(2);
     });
 
-    it('should include coverage init script when coverage=true', () => {
-      const args = BuildToolService.buildBatchCommandArgs(
+    it('should include coverage init script when coverage=true', async () => {
+      const args = await BuildToolService.buildBatchCommandArgs(
         ['TestA'],
         false,
         '/project',
@@ -281,60 +303,60 @@ describe('BuildToolService', () => {
   // ── hasGradleWrapper ──────────────────────────────────────────────
 
   describe('hasGradleWrapper', () => {
-    it('should return true when gradlew exists at project root', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) =>
-        String(p).endsWith('gradlew')
-      );
-      expect(BuildToolService.hasGradleWrapper('/project')).toBe(true);
+    it('should return true when gradlew exists at project root', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (!String(p).endsWith('gradlew')) throw new Error('ENOENT');
+      });
+      expect(await BuildToolService.hasGradleWrapper('/project')).toBe(true);
     });
 
-    it('should return false when no gradlew in hierarchy', () => {
-      mockedFs.existsSync.mockReturnValue(false);
-      expect(BuildToolService.hasGradleWrapper('/project')).toBe(false);
+    it('should return false when no gradlew in hierarchy', async () => {
+      mockedFs.promises.access.mockRejectedValue(new Error('ENOENT'));
+      expect(await BuildToolService.hasGradleWrapper('/project')).toBe(false);
     });
   });
 
   // ── isMavenProject ────────────────────────────────────────────────
 
   describe('isMavenProject', () => {
-    it('should return true when pom.xml exists', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) =>
-        String(p).endsWith('pom.xml')
-      );
-      expect(BuildToolService.isMavenProject('/my-project')).toBe(true);
+    it('should return true when pom.xml exists', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (!String(p).endsWith('pom.xml')) throw new Error('ENOENT');
+      });
+      expect(await BuildToolService.isMavenProject('/my-project')).toBe(true);
     });
 
-    it('should return false when pom.xml does not exist', () => {
-      mockedFs.existsSync.mockReturnValue(false);
-      expect(BuildToolService.isMavenProject('/my-project')).toBe(false);
+    it('should return false when pom.xml does not exist', async () => {
+      mockedFs.promises.access.mockRejectedValue(new Error('ENOENT'));
+      expect(await BuildToolService.isMavenProject('/my-project')).toBe(false);
     });
   });
 
   // ── findMavenProjectRoot ──────────────────────────────────────────
 
   describe('findMavenProjectRoot', () => {
-    it('should find project root at file directory level', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) =>
-        String(p) === path.join('/workspace/project', 'pom.xml')
-      );
-      mockedFs.statSync.mockImplementation(() => {
+    it('should find project root at file directory level', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (String(p) !== path.join('/workspace/project', 'pom.xml')) throw new Error('ENOENT');
+      });
+      mockedFs.promises.stat.mockImplementation(async () => {
         throw new Error('Not a directory');
       });
 
-      const result = BuildToolService.findMavenProjectRoot(
+      const result = await BuildToolService.findMavenProjectRoot(
         '/workspace/project/src/test/Spec.groovy',
         '/workspace'
       );
       expect(result).not.toBeNull();
     });
 
-    it('should return null when no pom.xml in hierarchy', () => {
-      mockedFs.existsSync.mockReturnValue(false);
-      mockedFs.statSync.mockImplementation(() => {
+    it('should return null when no pom.xml in hierarchy', async () => {
+      mockedFs.promises.access.mockRejectedValue(new Error('ENOENT'));
+      mockedFs.promises.stat.mockImplementation(async () => {
         throw new Error('nope');
       });
 
-      const result = BuildToolService.findMavenProjectRoot(
+      const result = await BuildToolService.findMavenProjectRoot(
         '/workspace/src/test/Spec.groovy',
         '/workspace'
       );
@@ -345,28 +367,28 @@ describe('BuildToolService', () => {
   // ── findMavenRootProject ──────────────────────────────────────────
 
   describe('findMavenRootProject', () => {
-    it('should find root project with <modules> in pom.xml', () => {
+    it('should find root project with <modules> in pom.xml', async () => {
       const wsRoot = path.resolve('/workspace');
       const subDir = path.join(wsRoot, 'sub-module');
 
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) =>
-        String(p) === path.join(wsRoot, 'pom.xml') ||
-        String(p) === path.join(subDir, 'pom.xml')
-      );
-      mockedFs.readFileSync.mockImplementation(((p: string) => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (String(p) !== path.join(wsRoot, 'pom.xml') &&
+            String(p) !== path.join(subDir, 'pom.xml')) throw new Error('ENOENT');
+      });
+      mockedFs.promises.readFile.mockImplementation((async (p: string) => {
         if (p === path.join(wsRoot, 'pom.xml')) {
           return '<project><modules><module>sub-module</module></modules></project>';
         }
         return '<project></project>';
       }) as any);
 
-      const result = BuildToolService.findMavenRootProject(subDir, wsRoot);
+      const result = await BuildToolService.findMavenRootProject(subDir, wsRoot);
       expect(result).toBe(wsRoot);
     });
 
-    it('should return original path when no parent with modules found', () => {
-      mockedFs.existsSync.mockReturnValue(false);
-      const result = BuildToolService.findMavenRootProject('/workspace/sub', '/workspace');
+    it('should return original path when no parent with modules found', async () => {
+      mockedFs.promises.access.mockRejectedValue(new Error('ENOENT'));
+      const result = await BuildToolService.findMavenRootProject('/workspace/sub', '/workspace');
       expect(result).toBe('/workspace/sub');
     });
   });
@@ -395,51 +417,51 @@ describe('BuildToolService', () => {
   // ── hasMavenWrapper ───────────────────────────────────────────────
 
   describe('hasMavenWrapper', () => {
-    it('should return true when mvnw exists at project root', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) =>
-        String(p).endsWith('mvnw')
-      );
-      expect(BuildToolService.hasMavenWrapper('/project')).toBe(true);
+    it('should return true when mvnw exists at project root', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (!String(p).endsWith('mvnw')) throw new Error('ENOENT');
+      });
+      expect(await BuildToolService.hasMavenWrapper('/project')).toBe(true);
     });
 
-    it('should return true when mvnw.cmd exists at project root', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) =>
-        String(p).endsWith('mvnw.cmd')
-      );
-      expect(BuildToolService.hasMavenWrapper('/project')).toBe(true);
+    it('should return true when mvnw.cmd exists at project root', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (!String(p).endsWith('mvnw.cmd')) throw new Error('ENOENT');
+      });
+      expect(await BuildToolService.hasMavenWrapper('/project')).toBe(true);
     });
 
-    it('should return false when no mvnw in hierarchy', () => {
-      mockedFs.existsSync.mockReturnValue(false);
-      expect(BuildToolService.hasMavenWrapper('/project')).toBe(false);
+    it('should return false when no mvnw in hierarchy', async () => {
+      mockedFs.promises.access.mockRejectedValue(new Error('ENOENT'));
+      expect(await BuildToolService.hasMavenWrapper('/project')).toBe(false);
     });
   });
 
   // ── findProjectRoot (generic) ─────────────────────────────────────
 
   describe('findProjectRoot', () => {
-    it('should prefer Gradle project root when both exist', () => {
-      mockedFs.existsSync.mockReturnValue(true);
-      mockedFs.statSync.mockImplementation(() => {
+    it('should prefer Gradle project root when both exist', async () => {
+      mockedFs.promises.access.mockResolvedValue(undefined);
+      mockedFs.promises.stat.mockImplementation(async () => {
         throw new Error('nope');
       });
 
-      const result = BuildToolService.findProjectRoot(
+      const result = await BuildToolService.findProjectRoot(
         '/workspace/project/src/test/Spec.groovy',
         '/workspace'
       );
       expect(result).not.toBeNull();
     });
 
-    it('should find Maven project root when no Gradle project', () => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
-        return String(p).endsWith('pom.xml');
+    it('should find Maven project root when no Gradle project', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (!String(p).endsWith('pom.xml')) throw new Error('ENOENT');
       });
-      mockedFs.statSync.mockImplementation(() => {
+      mockedFs.promises.stat.mockImplementation(async () => {
         throw new Error('nope');
       });
 
-      const result = BuildToolService.findProjectRoot(
+      const result = await BuildToolService.findProjectRoot(
         '/workspace/project/src/test/Spec.groovy',
         '/workspace'
       );
@@ -551,39 +573,39 @@ describe('BuildToolService', () => {
 
   describe('buildCommandArgs with Maven', () => {
     beforeEach(() => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
         const s = String(p);
-        if (s.endsWith('pom.xml')) { return true; }
-        if (s.endsWith('mvnw') || s.endsWith('mvnw.cmd')) { return true; }
-        return false;
+        if (s.endsWith('pom.xml')) return;
+        if (s.endsWith('mvnw') || s.endsWith('mvnw.cmd')) return;
+        throw new Error('ENOENT');
       });
     });
 
-    it('should build Maven test command', () => {
-      const args = BuildToolService.buildCommandArgs('MySpec.myTest', false, '/project', undefined, undefined, 'maven');
+    it('should build Maven test command', async () => {
+      const args = await BuildToolService.buildCommandArgs('MySpec.myTest', false, '/project', undefined, undefined, 'maven');
       expect(args[0]).toMatch(/mvnw/);
       expect(args).toContain('test');
       expect(args.some(a => a.includes('-Dtest='))).toBe(true);
     });
 
-    it('should include debug args when debug is true', () => {
-      const args = BuildToolService.buildCommandArgs('MySpec.myTest', true, '/project', undefined, undefined, 'maven');
+    it('should include debug args when debug is true', async () => {
+      const args = await BuildToolService.buildCommandArgs('MySpec.myTest', true, '/project', undefined, undefined, 'maven');
       expect(args.some(a => a.includes('maven.surefire.debug'))).toBe(true);
     });
   });
 
   describe('buildBatchCommandArgs with Maven', () => {
     beforeEach(() => {
-      mockedFs.existsSync.mockImplementation((p: fs.PathLike) => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
         const s = String(p);
-        if (s.endsWith('pom.xml')) { return true; }
-        if (s.endsWith('mvnw') || s.endsWith('mvnw.cmd')) { return true; }
-        return false;
+        if (s.endsWith('pom.xml')) return;
+        if (s.endsWith('mvnw') || s.endsWith('mvnw.cmd')) return;
+        throw new Error('ENOENT');
       });
     });
 
-    it('should build Maven batch command with grouped filters', () => {
-      const args = BuildToolService.buildBatchCommandArgs(
+    it('should build Maven batch command with grouped filters', async () => {
+      const args = await BuildToolService.buildBatchCommandArgs(
         ['TestA.m1', 'TestA.m2', 'TestB.m3'],
         false,
         '/project',
@@ -597,8 +619,8 @@ describe('BuildToolService', () => {
       expect(args.some(a => a.includes('-Dtest='))).toBe(true);
     });
 
-    it('should include JaCoCo goals when coverage=true', () => {
-      const args = BuildToolService.buildBatchCommandArgs(
+    it('should include JaCoCo goals when coverage=true', async () => {
+      const args = await BuildToolService.buildBatchCommandArgs(
         ['TestA.m1'],
         false,
         '/project',
@@ -610,8 +632,8 @@ describe('BuildToolService', () => {
       expect(args.some(a => a.includes('jacoco'))).toBe(true);
     });
 
-    it('should include -pl when module name is provided', () => {
-      const args = BuildToolService.buildBatchCommandArgs(
+    it('should include -pl when module name is provided', async () => {
+      const args = await BuildToolService.buildBatchCommandArgs(
         ['TestA.m1'],
         false,
         '/project',
@@ -622,6 +644,271 @@ describe('BuildToolService', () => {
       );
       expect(args).toContain('-pl');
       expect(args).toContain('sub-module');
+    });
+  });
+
+  // ── shellEscape ─────────────────────────────────────────────────────
+
+  describe('shellEscape', () => {
+    let shellEscapeFn: typeof import('../services/BuildToolService').shellEscape;
+
+    beforeEach(async () => {
+      const mod = await import('../services/BuildToolService');
+      shellEscapeFn = mod.shellEscape;
+    });
+
+    it('should wrap a simple string', () => {
+      const result = shellEscapeFn('hello');
+      // On any platform it should be quoted
+      expect(result.startsWith('"') || result.startsWith("'")).toBe(true);
+    });
+
+    it('should handle strings with spaces', () => {
+      const result = shellEscapeFn('hello world');
+      expect(result).toContain('hello world');
+    });
+
+    it('should handle strings with double quotes', () => {
+      const result = shellEscapeFn('say "hello"');
+      // The raw unescaped double-quote should not appear
+      expect(result).toContain('\\"');
+    });
+
+    it('should handle percent signs on Windows', () => {
+      const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      try {
+        const result = shellEscapeFn('100%done');
+        expect(result).toContain('%%');
+      } finally {
+        if (origPlatform) {
+          Object.defineProperty(process, 'platform', origPlatform);
+        }
+      }
+    });
+
+    it('should handle exclamation marks on Windows', () => {
+      const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      try {
+        const result = shellEscapeFn('hello!');
+        expect(result).toContain('^^!');
+      } finally {
+        if (origPlatform) {
+          Object.defineProperty(process, 'platform', origPlatform);
+        }
+      }
+    });
+
+    it('should neutralize & on Windows by wrapping in quotes', () => {
+      const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      try {
+        const result = shellEscapeFn('test & whoami');
+        expect(result.startsWith('"')).toBe(true);
+        expect(result.endsWith('"')).toBe(true);
+        expect(result).toContain('test & whoami');
+      } finally {
+        if (origPlatform) {
+          Object.defineProperty(process, 'platform', origPlatform);
+        }
+      }
+    });
+
+    it('should handle pipe | on Windows by wrapping in quotes', () => {
+      const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      try {
+        const result = shellEscapeFn('test | dir');
+        expect(result.startsWith('"')).toBe(true);
+        expect(result).toContain('test | dir');
+      } finally {
+        if (origPlatform) {
+          Object.defineProperty(process, 'platform', origPlatform);
+        }
+      }
+    });
+
+    it('should handle backticks', () => {
+      const result = shellEscapeFn('test `whoami`');
+      expect(result).toContain('test `whoami`');
+    });
+
+    it('should strip control characters on Windows', () => {
+      const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      try {
+        const result = shellEscapeFn('test\x00\x01\x02');
+        expect(result).not.toContain('\x00');
+        expect(result).not.toContain('\x01');
+      } finally {
+        if (origPlatform) {
+          Object.defineProperty(process, 'platform', origPlatform);
+        }
+      }
+    });
+
+    it('should handle < > ^ ( ) on Windows', () => {
+      const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      try {
+        const result = shellEscapeFn('a<b>c^d(e)');
+        expect(result.startsWith('"')).toBe(true);
+        expect(result.endsWith('"')).toBe(true);
+      } finally {
+        if (origPlatform) {
+          Object.defineProperty(process, 'platform', origPlatform);
+        }
+      }
+    });
+
+    it('should escape single quotes on Unix', () => {
+      const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      try {
+        const result = shellEscapeFn("it's a test");
+        expect(result).toBe("'it'\\''s a test'");
+      } finally {
+        if (origPlatform) {
+          Object.defineProperty(process, 'platform', origPlatform);
+        }
+      }
+    });
+  });
+
+  // ── sanitizeTestFilter ──────────────────────────────────────────────
+
+  describe('sanitizeTestFilter', () => {
+    let sanitizeTestFilterFn: typeof import('../services/BuildToolService').sanitizeTestFilter;
+
+    beforeEach(async () => {
+      const mod = await import('../services/BuildToolService');
+      sanitizeTestFilterFn = mod.sanitizeTestFilter;
+    });
+
+    it('should pass through normal test names', () => {
+      expect(sanitizeTestFilterFn('MySpec.my test')).toBe('MySpec.my test');
+    });
+
+    it('should strip null bytes', () => {
+      expect(sanitizeTestFilterFn('test\x00name')).toBe('testname');
+    });
+
+    it('should strip ASCII control characters', () => {
+      expect(sanitizeTestFilterFn('test\x01\x02\x03name')).toBe('testname');
+    });
+
+    it('should preserve spaces and tabs', () => {
+      expect(sanitizeTestFilterFn('test name\there')).toBe('test name\there');
+    });
+
+    it('should strip newlines and carriage returns', () => {
+      expect(sanitizeTestFilterFn('test\r\nname')).toBe('testname');
+    });
+
+    it('should log a warning when characters are stripped', () => {
+      const logger = { appendLine: vi.fn() } as any;
+      sanitizeTestFilterFn('test\x00name', logger);
+      expect(logger.appendLine).toHaveBeenCalledWith(
+        expect.stringContaining('WARNING')
+      );
+    });
+  });
+
+  // ── validateExtraArgs ───────────────────────────────────────────────
+
+  describe('validateExtraArgs', () => {
+    let validateExtraArgsFn: typeof import('../services/BuildToolService').validateExtraArgs;
+
+    beforeEach(async () => {
+      const mod = await import('../services/BuildToolService');
+      validateExtraArgsFn = mod.validateExtraArgs;
+    });
+
+    it('should pass through safe Gradle args', () => {
+      const result = validateExtraArgsFn(['--no-daemon', '-Dkey=value'], 'gradle');
+      expect(result).toEqual(['--no-daemon', '-Dkey=value']);
+    });
+
+    it('should block --init-script for Gradle', () => {
+      const result = validateExtraArgsFn(['--init-script', '/tmp/evil.gradle'], 'gradle');
+      expect(result).toEqual([]);
+    });
+
+    it('should block -I for Gradle', () => {
+      const result = validateExtraArgsFn(['-I', '/tmp/evil.gradle'], 'gradle');
+      expect(result).toEqual([]);
+    });
+
+    it('should block --file for Gradle', () => {
+      const result = validateExtraArgsFn(['--file', 'evil.gradle'], 'gradle');
+      expect(result).toEqual([]);
+    });
+
+    it('should block -f for Gradle', () => {
+      const result = validateExtraArgsFn(['-f', 'evil.gradle'], 'gradle');
+      expect(result).toEqual([]);
+    });
+
+    it('should block --project-dir for Gradle', () => {
+      const result = validateExtraArgsFn(['--project-dir', '/tmp/evil'], 'gradle');
+      expect(result).toEqual([]);
+    });
+
+    it('should block --init-script case-insensitively', () => {
+      const result = validateExtraArgsFn(['--Init-Script', '/tmp/evil.gradle'], 'gradle');
+      expect(result).toEqual([]);
+    });
+
+    it('should block -f for Maven', () => {
+      const result = validateExtraArgsFn(['-f', 'evil-pom.xml'], 'maven');
+      expect(result).toEqual([]);
+    });
+
+    it('should block --file for Maven', () => {
+      const result = validateExtraArgsFn(['--file', 'evil-pom.xml'], 'maven');
+      expect(result).toEqual([]);
+    });
+
+    it('should block --settings for Maven', () => {
+      const result = validateExtraArgsFn(['--settings', '/tmp/evil-settings.xml'], 'maven');
+      expect(result).toEqual([]);
+    });
+
+    it('should block --global-settings for Maven', () => {
+      const result = validateExtraArgsFn(['--global-settings', '/tmp/evil.xml'], 'maven');
+      expect(result).toEqual([]);
+    });
+
+    it('should pass through safe Maven args', () => {
+      const result = validateExtraArgsFn(['-Dkey=value', '-o'], 'maven');
+      expect(result).toEqual(['-Dkey=value', '-o']);
+    });
+
+    it('should reject args with control characters', () => {
+      const result = validateExtraArgsFn(['-Dkey=val\x00ue'], 'gradle');
+      expect(result).toEqual([]);
+    });
+
+    it('should reject args with newlines', () => {
+      const result = validateExtraArgsFn(['-Dkey=val\nue'], 'gradle');
+      expect(result).toEqual([]);
+    });
+
+    it('should log warnings for rejected args', () => {
+      const logger = { appendLine: vi.fn() } as any;
+      validateExtraArgsFn(['--init-script', '/tmp/evil.gradle'], 'gradle', logger);
+      expect(logger.appendLine).toHaveBeenCalledWith(
+        expect.stringContaining('WARNING')
+      );
+    });
+
+    it('should handle mixed safe and blocked args', () => {
+      const result = validateExtraArgsFn(
+        ['--no-daemon', '--init-script', '/tmp/evil.gradle', '-Dkey=value'],
+        'gradle'
+      );
+      expect(result).toEqual(['--no-daemon', '-Dkey=value']);
     });
   });
 });

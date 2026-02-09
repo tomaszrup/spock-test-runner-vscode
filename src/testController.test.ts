@@ -2,48 +2,71 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import { SpockTestController } from './testController';
+import { createMockLogger } from './__test_helpers__';
 
 // --- Mocks ---------------------------------------------------------------
 
 vi.mock('fs');
-vi.mock('./services/ConfigurationService', () => ({
-  ConfigurationService: {
-    getConfig: () => ({
-      debugPort: 5005,
-      testTimeout: 300,
-      debugConnectionTimeout: 60,
-      debugRetries: 3,
-      additionalGradleArgs: [],
-      additionalMavenArgs: [],
-      showDiffView: false,
-    }),
-    onConfigChange: () => ({ dispose: () => {} }),
-  },
-}));
-vi.mock('./services/BuildToolService', () => ({
-  BuildToolService: {
-    detectBuildTool: vi.fn(() => 'gradle'),
-    findProjectRoot: vi.fn((_fp: string, _ws: string) => '/workspace/project'),
-    findRootProject: vi.fn((_pr: string, _ws: string) => '/workspace/project'),
-    getProjectName: vi.fn(() => 'test-project'),
-    getSubprojectPrefix: vi.fn(() => ''),
-    getMavenModuleName: vi.fn(() => ''),
-    buildCommandArgs: vi.fn(() => ['gradle', 'test']),
-    buildBatchCommandArgs: vi.fn(() => ['gradle', 'test']),
-    isGradleProject: vi.fn(() => true),
-  },
-}));
-vi.mock('./services/TestDiscoveryService', () => ({
-  TestDiscoveryService: {
-    parseTestsInFile: vi.fn(() => []),
-    scanClassDeclarations: vi.fn(() => []),
-    resolveAllSpecBaseClasses: vi.fn(() => new Set<string>()),
-    hasAnnotation: vi.fn((_annotations: any, name: string) => false),
-  },
-}));
+vi.mock('./services/ConfigurationService', () => {
+  const mockConfig = {
+    debugPort: 5005,
+    testTimeout: 300,
+    debugConnectionTimeout: 60,
+    debugRetries: 3,
+    additionalGradleArgs: [],
+    additionalMavenArgs: [],
+    showDiffView: false,
+    testSourcePatterns: ['**/src/test/groovy/**/*.groovy'],
+  };
+  class MockConfigurationService {
+    getConfig() { return MockConfigurationService.getConfig(); }
+    onConfigChange(cb: any) { return MockConfigurationService.onConfigChange(cb); }
+    static getConfig() { return mockConfig; }
+    static onConfigChange() { return { dispose: () => {} }; }
+  }
+  return { ConfigurationService: MockConfigurationService };
+});
+vi.mock('./services/BuildToolService', () => {
+  class MockBuildToolService {
+    detectBuildTool(...args: any[]) { return MockBuildToolService.detectBuildTool(...args); }
+    findProjectRoot(...args: any[]) { return MockBuildToolService.findProjectRoot(...args); }
+    findRootProject(...args: any[]) { return MockBuildToolService.findRootProject(...args); }
+    getProjectName(...args: any[]) { return MockBuildToolService.getProjectName(...args); }
+    getSubprojectPrefix(...args: any[]) { return MockBuildToolService.getSubprojectPrefix(...args); }
+    getMavenModuleName(...args: any[]) { return MockBuildToolService.getMavenModuleName(...args); }
+    buildCommandArgs(...args: any[]) { return MockBuildToolService.buildCommandArgs(...args); }
+    buildBatchCommandArgs(...args: any[]) { return MockBuildToolService.buildBatchCommandArgs(...args); }
+    getTestResultsDir(...args: any[]) { return MockBuildToolService.getTestResultsDir(...args); }
+    static detectBuildTool = vi.fn(() => 'gradle');
+    static findProjectRoot = vi.fn((_fp: string, _ws: string) => '/workspace/project');
+    static findRootProject = vi.fn((_pr: string, _ws: string) => '/workspace/project');
+    static getProjectName = vi.fn(() => 'test-project');
+    static getSubprojectPrefix = vi.fn(() => '');
+    static getMavenModuleName = vi.fn(() => '');
+    static buildCommandArgs = vi.fn(() => ['gradle', 'test']);
+    static buildBatchCommandArgs = vi.fn(() => ['gradle', 'test']);
+    static isGradleProject = vi.fn(() => true);
+    static getTestResultsDir = vi.fn(() => '/workspace/project/build/test-results/test');
+  }
+  return { BuildToolService: MockBuildToolService };
+});
+vi.mock('./services/TestDiscoveryService', () => {
+  class MockTestDiscoveryService {
+    parseTestsInFile(...args: any[]) { return MockTestDiscoveryService.parseTestsInFile(...args); }
+    scanClassDeclarations(...args: any[]) { return MockTestDiscoveryService.scanClassDeclarations(...args); }
+    resolveAllSpecBaseClasses(...args: any[]) { return MockTestDiscoveryService.resolveAllSpecBaseClasses(...args); }
+    hasAnnotation(...args: any[]) { return MockTestDiscoveryService.hasAnnotation(...args); }
+    getAnnotationArgument(...args: any[]) { return MockTestDiscoveryService.getAnnotationArgument(...args); }
+    static parseTestsInFile = vi.fn(() => []);
+    static scanClassDeclarations = vi.fn(() => []);
+    static resolveAllSpecBaseClasses = vi.fn(() => new Set<string>());
+    static hasAnnotation = vi.fn((_annotations: any, _name: string) => false);
+    static getAnnotationArgument = vi.fn(() => undefined);
+  }
+  return { TestDiscoveryService: MockTestDiscoveryService };
+});
 vi.mock('./services/TestExecutionService', () => ({
   TestExecutionService: class MockTestExecutionService {
-    executeTest = vi.fn().mockResolvedValue({ success: true, output: '' });
     executeBatch = vi.fn().mockResolvedValue({ success: true, output: '' });
   },
 }));
@@ -64,23 +87,17 @@ vi.mock('./services/CoverageService', () => ({
     details: any[] = [];
   },
 }));
+vi.mock('./services/SpockErrorParser', () => ({
+  extractErrorForTest: vi.fn((_output: string, _className: string, _testName: string) => 'Test failed'),
+  hasErrorForClass: vi.fn(() => false),
+  parseTestError: vi.fn(() => ({ error: 'Test failed' })),
+}));
 
 const mockedFs = vi.mocked(fs);
 
 // --- Helpers -------------------------------------------------------------
 
-function createMockLogger() {
-  return {
-    name: 'test',
-    appendLine: vi.fn(),
-    append: vi.fn(),
-    clear: vi.fn(),
-    show: vi.fn(),
-    hide: vi.fn(),
-    dispose: vi.fn(),
-    replace: vi.fn(),
-  } as any;
-}
+// createMockLogger imported from __test_helpers__
 
 function createMockContext() {
   return {
@@ -918,16 +935,16 @@ describe('SpockTestController', () => {
 
       // Root file: projectRoot = rootProject (same)
       // Sub-module file: projectRoot != rootProject (different)
-      (BuildToolService.findProjectRoot as any).mockImplementation((fp: string, _ws: string) => {
+      (BuildToolService.findProjectRoot as any).mockImplementation(async (fp: string, _ws: string) => {
         if (fp.includes('sub-module')) {
           return '/workspace/maven-project/sub-module';
         }
         return '/workspace/maven-project';
       });
-      (BuildToolService.findRootProject as any).mockImplementation((_pr: string, _ws: string) => {
+      (BuildToolService.findRootProject as any).mockImplementation(async (_pr: string, _ws: string) => {
         return '/workspace/maven-project';
       });
-      (BuildToolService.getProjectName as any).mockImplementation((p: string) => {
+      (BuildToolService.getProjectName as any).mockImplementation(async (p: string) => {
         if (p.includes('sub-module')) { return 'sub-module'; }
         return 'maven-project';
       });

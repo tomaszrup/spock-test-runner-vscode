@@ -3,22 +3,12 @@ import * as fsp from 'fs/promises';
 import * as path from 'path';
 import { Uri, TestCoverageCount, StatementCoverage, Position } from '../__mocks__/vscode';
 import { CoverageService, SpockFileCoverage } from '../services/CoverageService';
+import { createMockLogger } from '../__test_helpers__';
 
 vi.mock('fs/promises');
 const mockedFsp = vi.mocked(fsp);
 
-function createMockLogger() {
-  return {
-    name: 'test',
-    appendLine: vi.fn(),
-    append: vi.fn(),
-    clear: vi.fn(),
-    show: vi.fn(),
-    hide: vi.fn(),
-    dispose: vi.fn(),
-    replace: vi.fn(),
-  } as any;
-}
+// createMockLogger imported from __test_helpers__
 
 describe('CoverageService', () => {
   let service: CoverageService;

@@ -13,6 +13,36 @@ export class DebugService {
     this.logger = logger;
   }
 
+  /**
+   * Find a free TCP port starting from the preferred port.
+   * Tries the preferred port first, then increments up to 100 times.
+   */
+  async findFreePort(preferredPort: number): Promise<number> {
+    for (let offset = 0; offset < 100; offset++) {
+      const port = preferredPort + offset;
+      if (port > 65535) { break; }
+      const free = await this.isPortFree(port);
+      if (free) {
+        if (offset > 0) {
+          this.logger.appendLine(`DebugService: Preferred port ${preferredPort} in use, using ${port} instead`);
+        }
+        return port;
+      }
+    }
+    throw new Error(`No free debug port found starting from ${preferredPort}`);
+  }
+
+  private isPortFree(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const server = net.createServer();
+      server.once('error', () => resolve(false));
+      server.once('listening', () => {
+        server.close(() => resolve(true));
+      });
+      server.listen(port, '127.0.0.1');
+    });
+  }
+
   async startDebugSession(options: DebugSessionOptions): Promise<void> {
     const cfg = ConfigurationService.getConfig();
     const connectionTimeoutMs = cfg.debugConnectionTimeout * 1000;
@@ -109,44 +139,36 @@ export class DebugService {
   }
 
   private async attemptDebugConnection(options: DebugSessionOptions): Promise<void> {
-    return new Promise(async (resolve, reject) => {
-      const sourcePaths = this.getSourcePaths(options.workspacePath);
-      
-      this.logger.appendLine(`DebugService: Debug source paths:`);
-      sourcePaths.forEach((sourcePath, index) => {
-        const exists = fs.existsSync(sourcePath);
-        this.logger.appendLine(`DebugService:   ${index + 1}. ${sourcePath} (exists: ${exists})`);
-      });
+    const sourcePaths = this.getSourcePaths(options.workspacePath);
 
-      const debugConfig: vscode.DebugConfiguration = {
-        type: 'java',
-        name: `Debug Spock Test: ${options.className}.${options.testName}`,
-        request: 'attach',
-        hostName: 'localhost',
-        port: options.debugPort,
-        projectName: BuildToolService.getProjectName(options.workspacePath),
-        sourcePaths: sourcePaths,
-        stepFilters: {
-          skipClasses: false,
-          skipSynthetics: false,
-          skipStaticInitializers: false,
-          skipConstructors: false
-        },
-        includeMain: true,
-        includeTest: true
-      };
-
-      try {
-        const success = await vscode.debug.startDebugging(undefined, debugConfig);
-        if (success) {
-          resolve();
-        } else {
-          reject(new Error('Failed to start debug session'));
-        }
-      } catch (error) {
-        reject(error);
-      }
+    this.logger.appendLine(`DebugService: Debug source paths:`);
+    sourcePaths.forEach((sourcePath, index) => {
+      const exists = fs.existsSync(sourcePath);
+      this.logger.appendLine(`DebugService:   ${index + 1}. ${sourcePath} (exists: ${exists})`);
     });
+
+    const debugConfig: vscode.DebugConfiguration = {
+      type: 'java',
+      name: `Debug Spock Test: ${options.className}.${options.testName}`,
+      request: 'attach',
+      hostName: 'localhost',
+      port: options.debugPort,
+      projectName: await BuildToolService.getProjectName(options.workspacePath),
+      sourcePaths: sourcePaths,
+      stepFilters: {
+        skipClasses: false,
+        skipSynthetics: false,
+        skipStaticInitializers: false,
+        skipConstructors: false
+      },
+      includeMain: true,
+      includeTest: true
+    };
+
+    const success = await vscode.debug.startDebugging(undefined, debugConfig);
+    if (!success) {
+      throw new Error('Failed to start debug session');
+    }
   }
 
   private getSourcePaths(workspacePath: string): string[] {

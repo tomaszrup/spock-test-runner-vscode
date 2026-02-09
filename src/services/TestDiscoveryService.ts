@@ -1,7 +1,19 @@
 import * as vscode from 'vscode';
 import { SpockAnnotation, SpockTestClass, SpockTestMethod } from '../types';
 
-export class TestDiscoveryService {
+/**
+ * Interface for test discovery — enables mocking in tests without
+ * requiring static method mocking.
+ */
+export interface ITestDiscoveryService {
+  scanClassDeclarations(content: string): Array<{ name: string; parent: string; isAbstract: boolean }>;
+  resolveAllSpecBaseClasses(declarations: Array<{ name: string; parent: string }>): Set<string>;
+  parseTestsInFile(content: string, knownSpecBaseClasses?: Set<string>): SpockTestClass[];
+  hasAnnotation(annotations: SpockAnnotation[] | undefined, name: string): boolean;
+  getAnnotationArgument(annotations: SpockAnnotation[] | undefined, name: string): string | undefined;
+}
+
+export class TestDiscoveryService implements ITestDiscoveryService {
   private static readonly LIFECYCLE_METHODS = new Set(['setup', 'setupSpec', 'cleanup', 'cleanupSpec']);
 
   // Broadened: matches any class that extends something (not just Specification)
@@ -424,5 +436,23 @@ export class TestDiscoveryService {
     }
     
     return false;
+  }
+
+  // ── Instance methods (delegate to static — for DI / mocking) ───────
+
+  scanClassDeclarations(content: string): Array<{ name: string; parent: string; isAbstract: boolean }> {
+    return TestDiscoveryService.scanClassDeclarations(content);
+  }
+  resolveAllSpecBaseClasses(declarations: Array<{ name: string; parent: string }>): Set<string> {
+    return TestDiscoveryService.resolveAllSpecBaseClasses(declarations);
+  }
+  parseTestsInFile(content: string, knownSpecBaseClasses?: Set<string>): SpockTestClass[] {
+    return TestDiscoveryService.parseTestsInFile(content, knownSpecBaseClasses);
+  }
+  hasAnnotation(annotations: SpockAnnotation[] | undefined, name: string): boolean {
+    return TestDiscoveryService.hasAnnotation(annotations, name);
+  }
+  getAnnotationArgument(annotations: SpockAnnotation[] | undefined, name: string): string | undefined {
+    return TestDiscoveryService.getAnnotationArgument(annotations, name);
   }
 }

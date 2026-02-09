@@ -244,6 +244,8 @@ export class RelativePattern {
 const _configValues: Record<string, any> = {};
 
 export const workspace = {
+  isTrusted: true,
+  onDidGrantWorkspaceTrust: (_listener: () => void) => ({ dispose: () => {} }),
   workspaceFolders: undefined as any[] | undefined,
   getConfiguration: (section?: string) => ({
     get: <T>(key: string, defaultValue?: T): T => {

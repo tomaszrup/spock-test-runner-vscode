@@ -3,13 +3,23 @@ import { SpockTestController } from './testController';
 
 export function activate(context: vscode.ExtensionContext) {
   const logger = vscode.window.createOutputChannel('Spock Test Runner', { log: true });
-
-  // Initialize the Test Controller with shared logger.
-  // The controller is self-contained — it registers run/debug/coverage profiles
-  // and handles all interaction through VS Code's Test API.
-  new SpockTestController(context, logger);
-
   context.subscriptions.push(logger);
+
+  // Workspace Trust gate — the extension runs build tools, which is inherently
+  // dangerous in untrusted workspaces.  The package.json `capabilities` section
+  // tells VS Code ≥ 1.72 to disable us outright; the runtime check below is
+  // defence-in-depth for older hosts.
+  if (vscode.workspace.isTrusted) {
+    new SpockTestController(context, logger);
+  } else {
+    logger.appendLine('Workspace is not trusted — deferring controller creation.');
+    const trustDisposable = vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      logger.appendLine('Workspace trust granted — creating test controller.');
+      new SpockTestController(context, logger);
+      trustDisposable.dispose();
+    });
+    context.subscriptions.push(trustDisposable);
+  }
 }
 
 export function deactivate() {}

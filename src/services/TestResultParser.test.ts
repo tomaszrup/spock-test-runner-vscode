@@ -1,19 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TestResultParser } from '../services/TestResultParser';
+import { createMockLogger } from '../__test_helpers__';
 
-// Create a mock logger
-function createMockLogger() {
-  return {
-    name: 'test',
-    appendLine: vi.fn(),
-    append: vi.fn(),
-    clear: vi.fn(),
-    show: vi.fn(),
-    hide: vi.fn(),
-    dispose: vi.fn(),
-    replace: vi.fn(),
-  } as any;
-}
+// createMockLogger imported from __test_helpers__
 
 describe('TestResultParser', () => {
   let parser: TestResultParser;
