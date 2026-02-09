@@ -94,7 +94,7 @@ Alternatively, use the convenience script:
 ./run-vscode.sh
 ```
 
-This script compiles the extension and opens VS Code with the sample project loaded.
+This script compiles the extension, packages it as a `.vsix`, installs it into VS Code, and opens the sample project.
 
 ## Usage
 
@@ -167,6 +167,7 @@ Gradle is checked first. If both `build.gradle` and `pom.xml` exist, Gradle take
 | `spockTestRunner.additionalGradleArgs` | `string[]` | `[]` | Additional CLI arguments passed to every Gradle invocation |
 | `spockTestRunner.additionalMavenArgs` | `string[]` | `[]` | Additional CLI arguments passed to every Maven invocation |
 | `spockTestRunner.showDiffView` | `boolean` | `false` | *(Preview)* Show expected/actual values in VS Code's inline diff view for failed assertions |
+| `spockTestRunner.testSourcePatterns` | `string[]` | `["**/src/test/groovy/**/*.groovy"]` | Glob patterns used to discover Spock test files. Add entries for custom source sets (e.g. `**/src/integrationTest/groovy/**/*.groovy`) |
 
 > **Note:** Log level is controlled via VS Code's native Output channel level selector (right-click the Output panel → "Set Log Level").
 
@@ -175,15 +176,22 @@ Gradle is checked first. If both `build.gradle` and `pom.xml` exist, Gradle take
 ```
 ├── src/
 │   ├── extension.ts                 # Extension entry point & command registration
-│   ├── testController.ts            # VS Code Test Controller (discovery, run, debug, coverage)
-│   ├── types.ts                     # Shared types (BuildTool enum, annotations, etc.)
+│   ├── testController.ts            # VS Code Test Controller — thin orchestrator
+│   ├── TestTreeManager.ts           # Test tree creation & refresh
+│   ├── ResultProcessor.ts           # Maps build output to VS Code test results
+│   ├── TestRunCoordinator.ts        # Coordinates run / debug / coverage profiles
+│   ├── types.ts                     # Shared types (BuildTool, annotations, etc.)
+│   ├── *.test.ts                    # Vitest unit tests for each module
 │   ├── __mocks__/
 │   │   └── vscode.ts               # VS Code API mock for unit tests
+│   ├── __test_helpers__/
+│   │   └── index.ts                # Shared test utilities
 │   └── services/
 │       ├── BuildToolService.ts      # Build tool detection (Gradle/Maven) & command building
 │       ├── ConfigurationService.ts  # Centralised settings accessor
 │       ├── CoverageService.ts       # JaCoCo XML report parsing & VS Code coverage API
 │       ├── DebugService.ts          # Debug session management (port 5005)
+│       ├── SpockErrorParser.ts      # Spock assertion error parsing & diff extraction
 │       ├── TestDiscoveryService.ts  # Groovy file parsing & test discovery
 │       ├── TestExecutionService.ts  # Process spawning & output handling
 │       └── TestResultParser.ts      # Console output & Surefire/Gradle XML report parsing
@@ -296,6 +304,7 @@ npm run package
 The `.vscode/launch.json` provides:
 
 - **Run Extension** — Launches an Extension Development Host with the extension loaded
+- **Extension Tests** — Runs integration tests in an Extension Development Host
 
 ## Troubleshooting
 
