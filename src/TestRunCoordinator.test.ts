@@ -8,6 +8,7 @@ import { createMockLogger } from './__test_helpers__';
 vi.mock('./services/SpockErrorParser', () => ({
   extractErrorForTest: vi.fn((_output: string, _className: string, _testName: string) => 'Test failed'),
   hasErrorForClass: vi.fn(() => false),
+  hasErrorForTest: vi.fn(() => false),
 }));
 
 // --- Helpers -------------------------------------------------------------
@@ -450,6 +451,63 @@ describe('TestRunCoordinator', () => {
       expect(coverageService.findAllJacocoXmlReports).toHaveBeenCalled();
       expect(run.addCoverage).toHaveBeenCalled();
     });
+
+    it('should split into sub-batches for Gradle when command line is long', async () => {
+      const run = createMockRun();
+
+      // Create enough tests to potentially trigger sub-batching
+      const tests: Array<{test: any; data: any}> = [];
+      for (let i = 0; i < 100; i++) {
+        const className = `com.example.very.long.package.name.TestSpec${i}`;
+        const testName = `should do something really important in test number ${i}`;
+        const t = controller.createTestItem(`t${i}`, testName, vscode.Uri.file('/workspace/project/spec.groovy'));
+        tests.push({ test: t, data: { type: 'test' as const, className, testName } });
+      }
+
+      // Mock buildBatchCommandArgs to return a realistic long command
+      buildToolService.buildBatchCommandArgs.mockImplementation(async (filters: string[]) => {
+        const args = ['gradlew.bat', 'test'];
+        for (const f of filters) {
+          args.push('--tests', `"${f}"`);
+        }
+        args.push('--stacktrace');
+        return args;
+      });
+
+      await coordinator.runBatch('/workspace/project', tests, run as any, false, createCancellationToken());
+
+      // Should have called executeBatch (at least once — exact count depends on platform limits)
+      expect(executionService.executeBatch).toHaveBeenCalled();
+      // All tests should have been started
+      for (const { test } of tests) {
+        expect(run.started).toHaveBeenCalledWith(test);
+      }
+    });
+
+    it('should pass classTestCounts for Gradle wildcard coalescing', async () => {
+      const run = createMockRun();
+      const classItem = controller.createTestItem('cls', 'MySpec', vscode.Uri.file('/workspace/project/spec.groovy'));
+      const test1 = controller.createTestItem('t1', 'test one', vscode.Uri.file('/workspace/project/spec.groovy'));
+      const test2 = controller.createTestItem('t2', 'test two', vscode.Uri.file('/workspace/project/spec.groovy'));
+      classItem.children.add(test1);
+      classItem.children.add(test2);
+
+      const tests = [
+        { test: test1, data: { type: 'test' as const, className: 'MySpec', testName: 'test one' } },
+        { test: test2, data: { type: 'test' as const, className: 'MySpec', testName: 'test two' } },
+      ];
+
+      await coordinator.runBatch('/workspace/project', tests, run as any, false, createCancellationToken());
+
+      // buildBatchCommandArgs should have been called with classTestCounts as the last arg
+      const calls = buildToolService.buildBatchCommandArgs.mock.calls;
+      // At least one call should have a Map as the last argument
+      const hasClassTestCounts = calls.some((call: any[]) => {
+        const lastArg = call[call.length - 1];
+        return lastArg instanceof Map && lastArg.get('MySpec') === 2;
+      });
+      expect(hasClassTestCounts).toBe(true);
+    });
   });
 
   // ── continuousRunHandler ─────────────────────────────────────────
@@ -463,6 +521,107 @@ describe('TestRunCoordinator', () => {
 
       await coordinator.continuousRunHandler(false, request, token);
       expect(coordinator.runHandler).toHaveBeenCalled();
+    });
+  });
+
+  // ── Real-time output FQN matching ────────────────────────────────
+
+  describe('real-time output FQN matching', () => {
+    it('should resolve a test when Gradle outputs FQN class name', async () => {
+      const run = createMockRun();
+      const passedSpy = run.passed; // save ref before createTrackingRun replaces it
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should add', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'CalculatorSpec', testName: 'should add' });
+
+      // Simulate Gradle output with FQN class name
+      executionService.executeBatch.mockImplementation(async (opts: any) => {
+        if (opts.onOutputLine) {
+          opts.onOutputLine('com.example.CalculatorSpec > should add PASSED');
+        }
+        return { success: true, output: 'com.example.CalculatorSpec > should add PASSED' };
+      });
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
+    });
+
+    it('should still resolve tests when Gradle uses simple class name', async () => {
+      const run = createMockRun();
+      const passedSpy = run.passed; // save ref before createTrackingRun replaces it
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should add', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'CalculatorSpec', testName: 'should add' });
+
+      // Simulate Gradle output with simple class name
+      executionService.executeBatch.mockImplementation(async (opts: any) => {
+        if (opts.onOutputLine) {
+          opts.onOutputLine('CalculatorSpec > should add PASSED');
+        }
+        return { success: true, output: 'CalculatorSpec > should add PASSED' };
+      });
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
+    });
+  });
+
+  // ── Fallback result reporting ────────────────────────────────────
+
+  describe('resolveFinalFallback', () => {
+    it('should report unresolved tests as passed when batch succeeds', async () => {
+      const run = createMockRun();
+      const passedSpy = run.passed; // save ref before createTrackingRun replaces it
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'test one', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'Spec', testName: 'test one' });
+
+      // executeBatch succeeds, no real-time match, no XML result
+      executionService.executeBatch.mockResolvedValue({ success: true, output: '' });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
+    });
+
+    it('should report passing test as passed even when batch fails overall', async () => {
+      const run = createMockRun();
+      const passedSpy = run.passed; // save ref before createTrackingRun replaces it
+      const failedSpy = run.failed;
+      const skippedSpy = run.skipped;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'passing test', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'Spec', testName: 'passing test' });
+
+      // Batch fails overall but no specific error for this test
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: 'OtherSpec > other test FAILED\nBUILD FAILED',
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      // Should be passed (not 'skipped' or 'failed'), because there's no
+      // evidence this specific test failed.
+      expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
+      expect(failedSpy).not.toHaveBeenCalled();
+      expect(skippedSpy).not.toHaveBeenCalled();
     });
   });
 });

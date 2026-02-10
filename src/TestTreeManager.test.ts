@@ -268,7 +268,28 @@ describe('TestTreeManager', () => {
   // ── getOrCreateFile ──────────────────────────────────────────────
 
   describe('getOrCreateFile', () => {
-    it('should create a file item under its project node', async () => {
+    it('should create a file item under a package node under its project node', async () => {
+      const uri = vscode.Uri.file('/workspace/project/src/test/groovy/com/example/Spec.groovy');
+
+      const file = await manager.getOrCreateFile(uri);
+
+      expect(file).toBeDefined();
+      expect(file.label).toBe('Spec.groovy');
+      expect(manager.testData.get(file)?.type).toBe('file');
+
+      // project node should have been created
+      expect(manager.projectItems.size).toBe(1);
+
+      // package node should have been created
+      expect(manager.packageItems.size).toBe(1);
+      const pkgItem = [...manager.packageItems.values()][0];
+      expect(pkgItem.label).toBe('com.example');
+
+      // file should be child of package
+      expect(pkgItem.children.get(file.id)).toBe(file);
+    });
+
+    it('should place file directly under project when no package is detected', async () => {
       const uri = vscode.Uri.file('/workspace/project/src/test/groovy/Spec.groovy');
 
       const file = await manager.getOrCreateFile(uri);
@@ -279,10 +300,13 @@ describe('TestTreeManager', () => {
 
       // project node should have been created
       expect(manager.projectItems.size).toBe(1);
+
+      // no package node
+      expect(manager.packageItems.size).toBe(0);
     });
 
     it('should return existing file item without duplicates', async () => {
-      const uri = vscode.Uri.file('/workspace/project/src/test/groovy/Spec.groovy');
+      const uri = vscode.Uri.file('/workspace/project/src/test/groovy/com/example/Spec.groovy');
 
       const file1 = await manager.getOrCreateFile(uri);
       const file2 = await manager.getOrCreateFile(uri);
@@ -291,7 +315,7 @@ describe('TestTreeManager', () => {
     });
 
     it('should create subproject node when project root differs from root project', async () => {
-      const uri = vscode.Uri.file('/workspace/project/sub/src/test/groovy/Spec.groovy');
+      const uri = vscode.Uri.file('/workspace/project/sub/src/test/groovy/com/example/Spec.groovy');
 
       buildToolService.findProjectRoot.mockResolvedValue('/workspace/project/sub');
       buildToolService.findRootProject.mockResolvedValue('/workspace/project');
@@ -304,6 +328,7 @@ describe('TestTreeManager', () => {
       expect(file).toBeDefined();
       expect(manager.subProjectItems.size).toBe(1);
       expect(manager.projectItems.size).toBe(1);
+      expect(manager.packageItems.size).toBe(1);
     });
   });
 
@@ -336,6 +361,93 @@ describe('TestTreeManager', () => {
       expect(sub.label).toBe('sub-module');
       expect(sub.tags.some((t: any) => t.id === 'runnable')).toBe(true);
       expect(manager.subProjectItems.size).toBe(1);
+    });
+  });
+
+  // ── extractPackageName ─────────────────────────────────────────
+
+  describe('extractPackageName', () => {
+    it('should extract package from standard Groovy test path', () => {
+      const result = manager.extractPackageName(
+        '/workspace/project/src/test/groovy/com/example/MySpec.groovy',
+        '/workspace/project',
+      );
+      expect(result).toBe('com.example');
+    });
+
+    it('should extract package from standard Java test path', () => {
+      const result = manager.extractPackageName(
+        '/workspace/project/src/test/java/org/foo/bar/MyTest.java',
+        '/workspace/project',
+      );
+      expect(result).toBe('org.foo.bar');
+    });
+
+    it('should extract package from main source path', () => {
+      const result = manager.extractPackageName(
+        '/workspace/project/src/main/groovy/com/example/MyClass.groovy',
+        '/workspace/project',
+      );
+      expect(result).toBe('com.example');
+    });
+
+    it('should return empty string when file is directly in source root', () => {
+      const result = manager.extractPackageName(
+        '/workspace/project/src/test/groovy/MySpec.groovy',
+        '/workspace/project',
+      );
+      expect(result).toBe('');
+    });
+
+    it('should return empty string when path has no recognized source root', () => {
+      const result = manager.extractPackageName(
+        '/workspace/project/tests/MySpec.groovy',
+        '/workspace/project',
+      );
+      expect(result).toBe('');
+    });
+
+    it('should handle deeply nested packages', () => {
+      const result = manager.extractPackageName(
+        '/workspace/project/src/test/groovy/com/example/deep/nested/pkg/MySpec.groovy',
+        '/workspace/project',
+      );
+      expect(result).toBe('com.example.deep.nested.pkg');
+    });
+  });
+
+  // ── getOrCreatePackageNode ─────────────────────────────────────
+
+  describe('getOrCreatePackageNode', () => {
+    it('should create a package node as child of parent', async () => {
+      const parent = await manager.getOrCreateRootProjectNode('/workspace/project');
+
+      const pkg = manager.getOrCreatePackageNode('com.example', parent, '/workspace/project');
+
+      expect(pkg.label).toBe('com.example');
+      expect(pkg.tags.some((t: any) => t.id === 'runnable')).toBe(true);
+      expect(manager.testData.get(pkg)?.type).toBe('package');
+      expect(manager.packageItems.size).toBe(1);
+    });
+
+    it('should reuse existing package node', async () => {
+      const parent = await manager.getOrCreateRootProjectNode('/workspace/project');
+
+      const pkg1 = manager.getOrCreatePackageNode('com.example', parent, '/workspace/project');
+      const pkg2 = manager.getOrCreatePackageNode('com.example', parent, '/workspace/project');
+
+      expect(pkg1).toBe(pkg2);
+      expect(manager.packageItems.size).toBe(1);
+    });
+
+    it('should create separate packages for different names', async () => {
+      const parent = await manager.getOrCreateRootProjectNode('/workspace/project');
+
+      const pkg1 = manager.getOrCreatePackageNode('com.example', parent, '/workspace/project');
+      const pkg2 = manager.getOrCreatePackageNode('org.other', parent, '/workspace/project');
+
+      expect(pkg1).not.toBe(pkg2);
+      expect(manager.packageItems.size).toBe(2);
     });
   });
 
@@ -487,11 +599,13 @@ describe('TestTreeManager', () => {
       // Pre-populate
       manager.projectItems.set('/old', controller.createTestItem('old', 'old'));
       manager.subProjectItems.set('/oldsub', controller.createTestItem('oldsub', 'oldsub'));
+      manager.packageItems.set('/old:com.example', controller.createTestItem('pkg', 'com.example'));
 
       await manager.discoverAllTests();
 
       expect(manager.projectItems.size).toBe(0);
       expect(manager.subProjectItems.size).toBe(0);
+      expect(manager.packageItems.size).toBe(0);
     });
   });
 

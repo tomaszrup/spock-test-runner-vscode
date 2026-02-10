@@ -911,4 +911,117 @@ describe('BuildToolService', () => {
       expect(result).toEqual(['--no-daemon', '-Dkey=value']);
     });
   });
+
+  // ── coalesceGradleFilters ──────────────────────────────────────────
+
+  describe('coalesceGradleFilters', () => {
+    it('should return filters unchanged when no classTestCounts provided', () => {
+      const filters = ['ClassA.test1', 'ClassA.test2', 'ClassB.test3'];
+      expect(BuildToolService.coalesceGradleFilters(filters)).toEqual(filters);
+    });
+
+    it('should return filters unchanged when classTestCounts is empty', () => {
+      const filters = ['ClassA.test1', 'ClassA.test2'];
+      expect(BuildToolService.coalesceGradleFilters(filters, new Map())).toEqual(filters);
+    });
+
+    it('should coalesce to wildcard when all methods of a class are selected', () => {
+      const filters = ['ClassA.test1', 'ClassA.test2', 'ClassA.test3'];
+      const counts = new Map([['ClassA', 3]]);
+      const result = BuildToolService.coalesceGradleFilters(filters, counts);
+      expect(result).toEqual(['ClassA.*']);
+    });
+
+    it('should not coalesce when only some methods of a class are selected', () => {
+      const filters = ['ClassA.test1', 'ClassA.test2'];
+      const counts = new Map([['ClassA', 5]]);
+      const result = BuildToolService.coalesceGradleFilters(filters, counts);
+      expect(result).toEqual(['ClassA.test1', 'ClassA.test2']);
+    });
+
+    it('should coalesce some classes and keep others as individual filters', () => {
+      const filters = [
+        'ClassA.test1', 'ClassA.test2',
+        'ClassB.testX', 'ClassB.testY', 'ClassB.testZ',
+      ];
+      const counts = new Map([['ClassA', 5], ['ClassB', 3]]);
+      const result = BuildToolService.coalesceGradleFilters(filters, counts);
+      // ClassA has 2/5 selected → keep individual; ClassB has 3/3 → wildcard
+      expect(result).toEqual(['ClassA.test1', 'ClassA.test2', 'ClassB.*']);
+    });
+
+    it('should handle single-method classes', () => {
+      const filters = ['Solo.onlyTest'];
+      const counts = new Map([['Solo', 1]]);
+      const result = BuildToolService.coalesceGradleFilters(filters, counts);
+      expect(result).toEqual(['Solo.*']);
+    });
+
+    it('should log when coalescing occurs', () => {
+      const filters = ['ClassA.test1', 'ClassA.test2'];
+      const counts = new Map([['ClassA', 2]]);
+      const logger = { appendLine: vi.fn() } as any;
+      BuildToolService.coalesceGradleFilters(filters, counts, logger);
+      expect(logger.appendLine).toHaveBeenCalledWith(
+        expect.stringContaining('Coalesced 1 class(es)')
+      );
+    });
+  });
+
+  // ── splitGradleTestFilters ──────────────────────────────────────────
+
+  describe('splitGradleTestFilters', () => {
+    const baseArgs = ['gradlew.bat', 'test', '--stacktrace', '--init-script', '"path/to/init.gradle"'];
+
+    it('should return single batch when everything fits', () => {
+      const filters = ['ClassA.test1', 'ClassB.test2'];
+      const result = BuildToolService.splitGradleTestFilters(filters, baseArgs, 10000);
+      expect(result).toEqual([filters]);
+    });
+
+    it('should split into multiple batches when exceeding limit', () => {
+      // Create many filters that exceed a small limit
+      const filters = Array.from({ length: 50 }, (_, i) => `com.example.MyLongClassName.test method number ${i}`);
+      const result = BuildToolService.splitGradleTestFilters(filters, baseArgs, 500);
+      expect(result.length).toBeGreaterThan(1);
+      // All filters should be present across batches
+      const allFilters = result.flat();
+      expect(allFilters).toEqual(filters);
+    });
+
+    it('should put at least one filter per batch even if it alone exceeds limit', () => {
+      const filters = ['VeryLongClassName.very long test method name that is quite long'];
+      const result = BuildToolService.splitGradleTestFilters(filters, baseArgs, 10);
+      expect(result).toEqual([filters]);
+    });
+
+    it('should handle empty filter list', () => {
+      const result = BuildToolService.splitGradleTestFilters([], baseArgs, 10000);
+      expect(result).toEqual([[]]);
+    });
+
+    it('should respect platform-specific max length', () => {
+      const maxLen = BuildToolService.getMaxCommandLineLength();
+      // On any platform, should return a positive number
+      expect(maxLen).toBeGreaterThan(0);
+    });
+  });
+
+  // ── estimateGradleArgsLength ───────────────────────────────────────
+
+  describe('estimateGradleArgsLength', () => {
+    it('should estimate length including --tests args', () => {
+      const baseArgs = ['gradlew.bat', 'test'];
+      const filters = ['ClassA.test1'];
+      const len = BuildToolService.estimateGradleArgsLength(baseArgs, filters);
+      expect(len).toBeGreaterThan('gradlew.bat test'.length);
+    });
+
+    it('should grow linearly with filter count', () => {
+      const baseArgs = ['gradlew.bat', 'test'];
+      const len1 = BuildToolService.estimateGradleArgsLength(baseArgs, ['A.t1']);
+      const len2 = BuildToolService.estimateGradleArgsLength(baseArgs, ['A.t1', 'B.t2']);
+      expect(len2).toBeGreaterThan(len1);
+    });
+  });
 });

@@ -1,5 +1,5 @@
 ﻿import { describe, it, expect } from 'vitest';
-import { parseTestError, extractErrorForTest, hasErrorForClass } from './SpockErrorParser';
+import { parseTestError, extractErrorForTest, hasErrorForClass, hasErrorForTest } from './SpockErrorParser';
 
 describe('SpockErrorParser', () => {
   // ── parseTestError ─────────────────────────────────────────────────
@@ -129,6 +129,48 @@ describe('SpockErrorParser', () => {
 
     it('should not match lines without error keywords', () => {
       expect(hasErrorForClass('MySpec > test PASSED', 'MySpec')).toBe(false);
+    });
+  });
+
+  // ── hasErrorForTest ────────────────────────────────────────────────
+
+  describe('hasErrorForTest', () => {
+    it('should return false for empty output', () => {
+      expect(hasErrorForTest('', 'MySpec', 'test')).toBe(false);
+    });
+
+    it('should return false for empty test name', () => {
+      expect(hasErrorForTest('MySpec > test FAILED', 'MySpec', '')).toBe(false);
+    });
+
+    it('should detect FAILED line for a specific test with simple class name', () => {
+      const output = 'MySpec > should add two numbers FAILED\nMySpec > should subtract PASSED';
+      expect(hasErrorForTest(output, 'MySpec', 'should add two numbers')).toBe(true);
+    });
+
+    it('should detect FAILED line for a specific test with FQN class name', () => {
+      const output = 'com.example.MySpec > should add FAILED\ncom.example.MySpec > should subtract PASSED';
+      expect(hasErrorForTest(output, 'MySpec', 'should add')).toBe(true);
+    });
+
+    it('should NOT detect failure for a passing test in the same class', () => {
+      const output = 'MySpec > should add FAILED\nMySpec > should subtract PASSED';
+      expect(hasErrorForTest(output, 'MySpec', 'should subtract')).toBe(false);
+    });
+
+    it('should NOT detect failure for a test in a different class', () => {
+      const output = 'OtherSpec > test FAILED';
+      expect(hasErrorForTest(output, 'MySpec', 'test')).toBe(false);
+    });
+
+    it('should handle FQN class name matching against simple name in test data', () => {
+      const output = 'com.example.CalculatorSpec > should divide FAILED';
+      expect(hasErrorForTest(output, 'CalculatorSpec', 'should divide')).toBe(true);
+    });
+
+    it('should detect Maven-style [ERROR] lines for a test', () => {
+      const output = '[ERROR] MySpec > test one FAILURE';
+      expect(hasErrorForTest(output, 'MySpec', 'test one')).toBe(true);
     });
   });
 });

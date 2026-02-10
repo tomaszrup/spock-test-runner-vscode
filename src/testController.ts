@@ -85,7 +85,7 @@ export class SpockTestController {
         await this.treeManager.discoverAllTests();
       } else {
         const data = this.treeManager.testData.get(test);
-        if (data?.type === 'project' || data?.type === 'subproject') {
+        if (data?.type === 'project' || data?.type === 'subproject' || data?.type === 'package') {
           this.logger.appendLine(`SpockTestController: Skipping resolve for ${data.type} node: ${test.label}`);
           return;
         }

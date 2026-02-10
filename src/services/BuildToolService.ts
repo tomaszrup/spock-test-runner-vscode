@@ -144,7 +144,7 @@ export interface IBuildToolService {
   getSubprojectPrefix(rootProject: string, subprojectPath: string): string;
   getMavenModuleName(rootProject: string, submodulePath: string): string;
   buildCommandArgs(testName: string, debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, buildTool?: BuildTool, debugPort?: number): Promise<string[]>;
-  buildBatchCommandArgs(testFilters: string[], debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, coverage?: boolean, buildTool?: BuildTool, debugPort?: number): Promise<string[]>;
+  buildBatchCommandArgs(testFilters: string[], debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, coverage?: boolean, buildTool?: BuildTool, debugPort?: number, classTestCounts?: Map<string, number>): Promise<string[]>;
   getTestResultsDir(projectRoot: string, buildTool: BuildTool): string;
 }
 
@@ -568,7 +568,8 @@ export class BuildToolService {
     subprojectPrefix?: string,
     coverage: boolean = false,
     buildTool?: BuildTool,
-    debugPort?: number
+    debugPort?: number,
+    classTestCounts?: Map<string, number>
   ): Promise<string[]> {
     const detected = buildTool || (workspacePath ? await this.detectBuildTool(workspacePath) : null);
     if (!detected && logger) {
@@ -582,7 +583,7 @@ export class BuildToolService {
     if (detectedTool === 'maven') {
       return this.buildMavenBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage, debugPort);
     }
-    return this.buildGradleBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage, debugPort);
+    return this.buildGradleBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage, debugPort, classTestCounts);
   }
 
   // ── Gradle command building ────────────────────────────────────────
@@ -633,7 +634,8 @@ export class BuildToolService {
     logger?: vscode.OutputChannel,
     subprojectPrefix?: string,
     coverage: boolean = false,
-    debugPort?: number
+    debugPort?: number,
+    classTestCounts?: Map<string, number>
   ): Promise<string[]> {
     let gradleCommand: string;
     const wsRoot = workspacePath ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(workspacePath))?.uri.fsPath : undefined;
@@ -645,7 +647,8 @@ export class BuildToolService {
 
     const taskName = subprojectPrefix ? `${subprojectPrefix}:test` : 'test';
     const args = [gradleCommand, taskName];
-    for (const filter of testFilters) {
+    const coalesced = this.coalesceGradleFilters(testFilters, classTestCounts, logger);
+    for (const filter of coalesced) {
       args.push('--tests', shellEscape(sanitizeTestFilter(filter, logger)));
     }
 
@@ -859,6 +862,130 @@ export class BuildToolService {
     return result;
   }
 
+  // ── Command-line length management ─────────────────────────────────
+
+  /**
+   * Coalesce individual Gradle test filters into class-level wildcards.
+   *
+   * When every known test method of a class is present in the filter list,
+   * replaces all `ClassName.method1`, `ClassName.method2`, … with a single
+   * `ClassName.*`.  This dramatically reduces the number of `--tests` args.
+   *
+   * @param testFilters  Original filters in `ClassName.methodName` format.
+   * @param classTestCounts  Optional map of `className → total method count`
+   *   from the full test tree.  When provided, wildcard coalescing only
+   *   happens if *all* methods of the class are selected.  When absent,
+   *   coalescing is skipped (conservative).
+   * @returns The (potentially shorter) filter list.
+   */
+  static coalesceGradleFilters(
+    testFilters: string[],
+    classTestCounts?: Map<string, number>,
+    logger?: vscode.OutputChannel,
+  ): string[] {
+    if (!classTestCounts || classTestCounts.size === 0) {
+      return testFilters;
+    }
+
+    // Group selected filters by class name
+    const selectedByClass = new Map<string, string[]>();
+    for (const filter of testFilters) {
+      const dotIdx = filter.indexOf('.');
+      if (dotIdx > 0) {
+        const className = filter.substring(0, dotIdx);
+        if (!selectedByClass.has(className)) {
+          selectedByClass.set(className, []);
+        }
+        selectedByClass.get(className)!.push(filter);
+      }
+    }
+
+    const result: string[] = [];
+    const coalescedClasses = new Set<string>();
+
+    for (const [className, filters] of selectedByClass) {
+      const totalMethods = classTestCounts.get(className);
+      if (totalMethods !== undefined && filters.length >= totalMethods) {
+        // All methods of this class are selected → use wildcard
+        result.push(`${className}.*`);
+        coalescedClasses.add(className);
+      } else {
+        // Only some methods selected → keep individual filters
+        result.push(...filters);
+      }
+    }
+
+    if (coalescedClasses.size > 0 && logger) {
+      logger.appendLine(`BuildToolService: Coalesced ${coalescedClasses.size} class(es) to wildcard filters (reduced ${testFilters.length} → ${result.length} filters)`);
+    }
+
+    return result;
+  }
+
+  /**
+   * Estimate the total command-line length (in characters) for a set of
+   * Gradle `--tests` arguments.  Used to decide whether sub-batching is
+   * required.
+   */
+  static estimateGradleArgsLength(baseArgs: string[], testFilters: string[]): number {
+    // base command + spaces
+    let len = baseArgs.join(' ').length;
+    for (const filter of testFilters) {
+      // " --tests " + shellEscape(filter)
+      len += ' --tests '.length + shellEscape(sanitizeTestFilter(filter)).length;
+    }
+    return len;
+  }
+
+  /**
+   * Maximum safe command-line length per platform.
+   * Windows cmd.exe: 8191 chars; other OSes: 128 KB (conservative).
+   */
+  static getMaxCommandLineLength(): number {
+    return process.platform === 'win32' ? 7500 : 120_000;
+  }
+
+  /**
+   * Split test filters into sub-batches so that each batch's estimated
+   * command-line length stays below the OS limit.
+   *
+   * @param testFilters  Full list of Gradle test filters.
+   * @param baseArgs     The command args *without* `--tests` entries
+   *                     (e.g. `['gradlew.bat', 'test', '--stacktrace', ...]`).
+   * @param maxLen       Maximum allowed command-line length.
+   * @returns Array of filter sub-arrays.  If everything fits, returns a
+   *          single-element array containing the original filters.
+   */
+  static splitGradleTestFilters(
+    testFilters: string[],
+    baseArgs: string[],
+    maxLen?: number,
+  ): string[][] {
+    const limit = maxLen ?? this.getMaxCommandLineLength();
+    const baseLen = baseArgs.join(' ').length;
+
+    const batches: string[][] = [];
+    let currentBatch: string[] = [];
+    let currentLen = baseLen;
+
+    for (const filter of testFilters) {
+      const addition = ' --tests '.length + shellEscape(sanitizeTestFilter(filter)).length;
+      if (currentBatch.length > 0 && currentLen + addition > limit) {
+        batches.push(currentBatch);
+        currentBatch = [];
+        currentLen = baseLen;
+      }
+      currentBatch.push(filter);
+      currentLen += addition;
+    }
+
+    if (currentBatch.length > 0) {
+      batches.push(currentBatch);
+    }
+
+    return batches.length > 0 ? batches : [testFilters];
+  }
+
   // ── Shared / init scripts ──────────────────────────────────────────
 
   private static async getInitScriptPath(): Promise<string> {
@@ -917,8 +1044,8 @@ export class BuildToolService {
   async buildCommandArgs(testName: string, debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, buildTool?: BuildTool, debugPort?: number): Promise<string[]> {
     return BuildToolService.buildCommandArgs(testName, debug, workspacePath, logger, subprojectPrefix, buildTool, debugPort);
   }
-  async buildBatchCommandArgs(testFilters: string[], debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, coverage: boolean = false, buildTool?: BuildTool, debugPort?: number): Promise<string[]> {
-    return BuildToolService.buildBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage, buildTool, debugPort);
+  async buildBatchCommandArgs(testFilters: string[], debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, coverage: boolean = false, buildTool?: BuildTool, debugPort?: number, classTestCounts?: Map<string, number>): Promise<string[]> {
+    return BuildToolService.buildBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage, buildTool, debugPort, classTestCounts);
   }
   getTestResultsDir(projectRoot: string, buildTool: BuildTool): string {
     return BuildToolService.getTestResultsDir(projectRoot, buildTool);

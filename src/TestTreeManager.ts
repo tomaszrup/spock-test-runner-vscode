@@ -14,6 +14,7 @@ export class TestTreeManager {
   public iterationItems = new Map<string, vscode.TestItem[]>();
   public projectItems = new Map<string, vscode.TestItem>();
   public subProjectItems = new Map<string, vscode.TestItem>();
+  public packageItems = new Map<string, vscode.TestItem>();
   public knownSpecBaseClasses = new Set<string>();
   private discoveryInProgress = false;
   private watchers: vscode.FileSystemWatcher[] = [];
@@ -61,8 +62,21 @@ export class TestTreeManager {
         });
         watcher.onDidDelete(uri => {
           this.logger.appendLine(`TestTreeManager: File deleted: ${uri.fsPath}`);
+          // Remove file from package nodes, then clean up empty packages
+          for (const [pkgKey, pkgItem] of this.packageItems) {
+            pkgItem.children.delete(uri.toString());
+            if (pkgItem.children.size === 0) {
+              // Remove empty package from its parent (subproject or project)
+              for (const [, subItem] of this.subProjectItems) {
+                subItem.children.delete(pkgItem.id);
+              }
+              for (const [, projectItem] of this.projectItems) {
+                projectItem.children.delete(pkgItem.id);
+              }
+              this.packageItems.delete(pkgKey);
+            }
+          }
           for (const [subPath, subItem] of this.subProjectItems) {
-            subItem.children.delete(uri.toString());
             if (subItem.children.size === 0) {
               for (const [, projectItem] of this.projectItems) {
                 projectItem.children.delete(subItem.id);
@@ -71,7 +85,6 @@ export class TestTreeManager {
             }
           }
           for (const [rootPath, projectItem] of this.projectItems) {
-            projectItem.children.delete(uri.toString());
             if (projectItem.children.size === 0) {
               this.controller.items.delete(projectItem.id);
               this.projectItems.delete(rootPath);
@@ -115,6 +128,7 @@ export class TestTreeManager {
           this.controller.items.replace([]);
           this.projectItems.clear();
           this.subProjectItems.clear();
+          this.packageItems.clear();
 
           // Notify listeners that tree was rebuilt (e.g. to clear stale re-run state)
           this._onDidRebuildTree.fire();
@@ -316,6 +330,12 @@ export class TestTreeManager {
         return existingInSub;
       }
     }
+    for (const [, pkgItem] of this.packageItems) {
+      const existingInPkg = pkgItem.children.get(uri.toString());
+      if (existingInPkg) {
+        return existingInPkg;
+      }
+    }
 
     const file = this.controller.createTestItem(uri.toString(), path.basename(uri.fsPath), uri);
     file.canResolveChildren = true;
@@ -327,12 +347,22 @@ export class TestTreeManager {
       const projectRoot = await this.buildToolService.findProjectRoot(uri.fsPath, workspaceFolder.uri.fsPath);
       if (projectRoot) {
         const rootProject = await this.buildToolService.findRootProject(projectRoot, workspaceFolder.uri.fsPath);
+        let parentNode: vscode.TestItem;
+        let parentPath: string;
         if (path.resolve(projectRoot) !== path.resolve(rootProject)) {
-          const subNode = await this.getOrCreateSubProjectNode(projectRoot, rootProject);
-          subNode.children.add(file);
+          parentNode = await this.getOrCreateSubProjectNode(projectRoot, rootProject);
+          parentPath = projectRoot;
         } else {
-          const rootNode = await this.getOrCreateRootProjectNode(rootProject);
-          rootNode.children.add(file);
+          parentNode = await this.getOrCreateRootProjectNode(rootProject);
+          parentPath = rootProject;
+        }
+
+        const packageName = this.extractPackageName(uri.fsPath, projectRoot);
+        if (packageName) {
+          const pkgNode = this.getOrCreatePackageNode(packageName, parentNode, parentPath);
+          pkgNode.children.add(file);
+        } else {
+          parentNode.children.add(file);
         }
         return file;
       }
@@ -340,6 +370,48 @@ export class TestTreeManager {
 
     this.controller.items.add(file);
     return file;
+  }
+
+  // ── Package extraction & node creation ─────────────────────────────
+
+  /**
+   * Extract the Java/Groovy package name from a file path relative to a project root.
+   * Looks for common source root patterns like `src/test/groovy/`, `src/test/java/`, etc.
+   * Returns the dotted package name (e.g. `com.example`) or empty string if not found.
+   */
+  extractPackageName(filePath: string, projectRoot: string): string {
+    const relativePath = path.relative(projectRoot, filePath).replace(/\\/g, '/');
+    // Match patterns like src/{sourceSet}/{language}/ — e.g. src/test/groovy/, src/main/java/
+    const sourceRootPattern = /^(.*?src\/[^/]+\/(?:groovy|java|kotlin|scala))\//;
+    const match = relativePath.match(sourceRootPattern);
+    if (match) {
+      const afterSourceRoot = relativePath.substring(match[1].length + 1);
+      const dir = afterSourceRoot.substring(0, afterSourceRoot.lastIndexOf('/'));
+      if (dir) {
+        return dir.replace(/\//g, '.');
+      }
+    }
+    return '';
+  }
+
+  getOrCreatePackageNode(packageName: string, parentNode: vscode.TestItem, parentPath: string): vscode.TestItem {
+    const key = `${parentPath}:${packageName}`;
+    const existing = this.packageItems.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    const pkgItem = this.controller.createTestItem(
+      `package:${key}`,
+      packageName,
+    );
+    pkgItem.canResolveChildren = true;
+    pkgItem.tags = [new vscode.TestTag('runnable')];
+    this.testData.set(pkgItem, { type: 'package' });
+    parentNode.children.add(pkgItem);
+    this.packageItems.set(key, pkgItem);
+    this.logger.appendLine(`TestTreeManager: Created package node: ${packageName} under ${parentNode.label}`);
+    return pkgItem;
   }
 
   // ── File parsing ───────────────────────────────────────────────────
@@ -488,6 +560,32 @@ export class TestTreeManager {
       this.logger.debug(`File ${file.uri.fsPath} - Kept in tree (has classes, none runnable)`);
     } else {
       this.logger.debug(`File ${file.uri.fsPath} - Removing from tree (no runnable tests)`);
+      // Remove file from package nodes, then clean up empty packages/subprojects/projects
+      for (const [pkgKey, pkgItem] of this.packageItems) {
+        pkgItem.children.delete(file.id);
+        if (pkgItem.children.size === 0) {
+          for (const [subPath, subItem] of this.subProjectItems) {
+            subItem.children.delete(pkgItem.id);
+            if (subItem.children.size === 0) {
+              for (const [, projectItem] of this.projectItems) {
+                projectItem.children.delete(subItem.id);
+              }
+              this.subProjectItems.delete(subPath);
+              this.logger.debug(`Subproject ${subItem.label} - Removed (empty)`);
+            }
+          }
+          for (const [projectRoot, projectItem] of this.projectItems) {
+            projectItem.children.delete(pkgItem.id);
+            if (projectItem.children.size === 0) {
+              this.controller.items.delete(projectItem.id);
+              this.projectItems.delete(projectRoot);
+              this.logger.debug(`Root project ${projectItem.label} - Removed (empty)`);
+            }
+          }
+          this.packageItems.delete(pkgKey);
+          this.logger.debug(`Package ${pkgItem.label} - Removed (empty)`);
+        }
+      }
       for (const [subPath, subItem] of this.subProjectItems) {
         subItem.children.delete(file.id);
         if (subItem.children.size === 0) {

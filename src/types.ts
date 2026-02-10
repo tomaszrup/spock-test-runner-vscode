@@ -30,7 +30,7 @@ export interface SpockAnnotation {
 }
 
 export interface TestData {
-  type: 'project' | 'subproject' | 'file' | 'class' | 'test';
+  type: 'project' | 'subproject' | 'package' | 'file' | 'class' | 'test';
   className?: string;
   testName?: string;
   isDataDriven?: boolean;

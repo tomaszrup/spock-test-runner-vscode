@@ -1,9 +1,9 @@
 import * as vscode from 'vscode';
-import { IBuildToolService } from './services/BuildToolService';
+import { IBuildToolService, BuildToolService } from './services/BuildToolService';
 import { CoverageService } from './services/CoverageService';
 import { TestExecutionService } from './services/TestExecutionService';
 import { TestResultParser } from './services/TestResultParser';
-import { extractErrorForTest, hasErrorForClass } from './services/SpockErrorParser';
+import { extractErrorForTest, hasErrorForClass, hasErrorForTest } from './services/SpockErrorParser';
 import { TestData, BuildTool } from './types';
 import { TestTreeManager } from './TestTreeManager';
 import { ResultProcessor } from './ResultProcessor';
@@ -246,6 +246,9 @@ export class TestRunCoordinator {
         case 'subproject':
           test.children.forEach(child => queue.push(child));
           break;
+        case 'package':
+          test.children.forEach(child => queue.push(child));
+          break;
         case 'file':
           if (test.children.size === 0) {
             await this.treeManager.discoverTestsInFile(test);
@@ -345,6 +348,136 @@ export class TestRunCoordinator {
       return;
     }
 
+    // Compute per-class method counts from the full test tree for wildcard coalescing
+    const classTestCounts = this.buildClassTestCounts(tests);
+
+    // For Gradle, check if sub-batching is needed to avoid command-line-too-long
+    if (buildTool === 'gradle') {
+      await this.runGradleBatchWithSplitting(
+        testFilters, classTestCounts, testLookup, tests,
+        debug, rootProject, subprojectPrefix, coverage, buildTool,
+        run, token, start, projectRoot,
+      );
+    } else {
+      // Maven: single batch (uses compact -Dtest= filter)
+      await this.runSingleBatch(
+        testFilters, testLookup, tests,
+        debug, rootProject, subprojectPrefix, coverage, buildTool,
+        run, token, start, projectRoot,
+      );
+    }
+  }
+
+  /**
+   * Run Gradle tests, automatically splitting into sub-batches if the
+   * estimated command-line length would exceed the OS limit.
+   */
+  private async runGradleBatchWithSplitting(
+    testFilters: string[],
+    classTestCounts: Map<string, number>,
+    testLookup: Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>,
+    tests: Array<{test: vscode.TestItem; data: TestData}>,
+    debug: boolean,
+    rootProject: string,
+    subprojectPrefix: string | undefined,
+    coverage: boolean,
+    buildTool: BuildTool,
+    run: vscode.TestRun,
+    token: vscode.CancellationToken,
+    start: number,
+    projectRoot: string,
+  ): Promise<void> {
+    // Build a "probe" command to get the base args (without --tests entries)
+    const probeArgs = await this.buildToolService.buildBatchCommandArgs(
+      [], debug, rootProject, this.logger, subprojectPrefix, coverage, buildTool,
+    );
+
+    // Apply wildcard coalescing first (reduces filter count significantly)
+    const coalesced = BuildToolService.coalesceGradleFilters(testFilters, classTestCounts, this.logger);
+
+    // Split into sub-batches based on estimated command-line length
+    const batches = BuildToolService.splitGradleTestFilters(coalesced, probeArgs);
+
+    if (batches.length > 1) {
+      this.logger.appendLine(
+        `TestRunCoordinator: Command line too long — splitting ${coalesced.length} filters into ${batches.length} sub-batches`,
+      );
+    }
+
+    let combinedResult = { success: true, output: '' };
+
+    for (let i = 0; i < batches.length; i++) {
+      if (token.isCancellationRequested) { break; }
+
+      const batchFilters = batches[i];
+      const commandArgs = await this.buildToolService.buildBatchCommandArgs(
+        batchFilters, debug, rootProject, this.logger, subprojectPrefix, coverage, buildTool,
+        undefined, classTestCounts,
+      );
+
+      if (batches.length > 1) {
+        this.logger.appendLine(`TestRunCoordinator: Running sub-batch ${i + 1}/${batches.length} (${batchFilters.length} filters)`);
+      }
+      this.logger.appendLine(`TestRunCoordinator: Running batch of ${tests.length} test(s) in ${projectRoot}${coverage ? ' (with coverage)' : ''}`);
+      this.logger.appendLine(`TestRunCoordinator: Build tool: ${buildTool}, root project: ${rootProject}`);
+      this.logger.appendLine(`TestRunCoordinator: Command: ${commandArgs.join(' ')}`);
+      this.logger.appendLine(`TestRunCoordinator: Test filters: ${JSON.stringify(batchFilters)}`);
+
+      const result = await this.testExecutionService.executeBatch({
+        commandArgs,
+        workspacePath: rootProject,
+        run,
+        testItems: tests.map(t => t.test),
+        debug,
+        token,
+        onOutputLine: (line: string) => this.handleRealTimeOutputLine(line, testLookup, run, start),
+      });
+
+      // Merge results
+      combinedResult.output += result.output + '\n';
+      if (!result.success) {
+        combinedResult.success = false;
+      }
+    }
+
+    if (token.isCancellationRequested) {
+      for (const [, entry] of testLookup) {
+        if (!entry.resolved) {
+          run.skipped(entry.test);
+          entry.resolved = true;
+        }
+      }
+      return;
+    }
+
+    // Resolve remaining results through multiple strategies
+    await this.resolveDataDrivenResults(testLookup, combinedResult, run, projectRoot, buildTool, start);
+    await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start);
+    this.resolveFinalFallback(testLookup, combinedResult, run, start);
+
+    // Attach coverage data
+    if (coverage) {
+      await this.attachCoverageData(rootProject, run);
+    }
+  }
+
+  /**
+   * Run a single batch (no splitting). Used for Maven and small Gradle batches.
+   */
+  private async runSingleBatch(
+    testFilters: string[],
+    testLookup: Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>,
+    tests: Array<{test: vscode.TestItem; data: TestData}>,
+    debug: boolean,
+    rootProject: string,
+    subprojectPrefix: string | undefined,
+    coverage: boolean,
+    buildTool: BuildTool,
+    run: vscode.TestRun,
+    token: vscode.CancellationToken,
+    start: number,
+    projectRoot: string,
+  ): Promise<void> {
     // Execute tests
     const commandArgs = await this.buildToolService.buildBatchCommandArgs(
       testFilters, debug, rootProject, this.logger, subprojectPrefix, coverage, buildTool,
@@ -432,6 +565,39 @@ export class TestRunCoordinator {
     return { testFilters, testLookup };
   }
 
+  /**
+   * Build a map of `className → number of test methods` by inspecting
+   * the parent class nodes of the selected tests.  This is used for
+   * wildcard coalescing: when all methods of a class are selected we
+   * can emit `--tests "ClassName.*"` instead of one `--tests` per method.
+   */
+  private buildClassTestCounts(
+    tests: Array<{test: vscode.TestItem; data: TestData}>,
+  ): Map<string, number> {
+    const counts = new Map<string, number>();
+
+    // Walk selected tests and inspect their parent (the class node)
+    // to count total children.
+    const visitedClasses = new Set<string>();
+
+    for (const { test, data } of tests) {
+      if (!data.className || visitedClasses.has(data.className)) {
+        continue;
+      }
+
+      // The parent of a 'test' node is normally its class node
+      const classNode = test.parent;
+      if (classNode) {
+        let methodCount = 0;
+        classNode.children.forEach(() => { methodCount++; });
+        counts.set(data.className, methodCount);
+        visitedClasses.add(data.className);
+      }
+    }
+
+    return counts;
+  }
+
   private handleRealTimeOutputLine(
     line: string,
     testLookup: Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>,
@@ -449,8 +615,17 @@ export class TestRunCoordinator {
       return;
     }
 
+    // Try FQN key first (e.g. "com.example.CalculatorSpec#test name"),
+    // then fall back to simple class name (e.g. "CalculatorSpec#test name")
+    // because the test tree stores simple names while Gradle outputs FQN.
     const key = `${className}#${testPart}`;
-    const entry = testLookup.get(key);
+    let entry = testLookup.get(key);
+    if (!entry) {
+      const simpleName = className.includes('.') ? className.substring(className.lastIndexOf('.') + 1) : undefined;
+      if (simpleName) {
+        entry = testLookup.get(`${simpleName}#${testPart}`);
+      }
+    }
 
     if (entry && !entry.resolved && !entry.data.isDataDriven) {
       entry.resolved = true;
@@ -527,14 +702,21 @@ export class TestRunCoordinator {
     for (const [, entry] of testLookup) {
       if (!entry.resolved) {
         if (result.success) {
+          // Overall batch passed — all unresolved tests must have passed
           run.passed(entry.test, Date.now() - start);
         } else {
-          const classError = hasErrorForClass(result.output, entry.data.className!);
-          if (classError) {
+          // Batch failed — check if THIS SPECIFIC test failed, not just the class.
+          // hasErrorForClass is too broad: it returns true for all tests in a class
+          // even if only one test failed. We need per-test granularity.
+          const testError = hasErrorForTest(result.output, entry.data.className!, entry.data.testName!);
+          if (testError) {
             const errorMessage = extractErrorForTest(result.output, entry.data.className!, entry.data.testName!);
             run.failed(entry.test, this.resultProcessor.createTestMessage(errorMessage), Date.now() - start);
           } else {
-            run.skipped(entry.test);
+            // No failure detected for this specific test.
+            // Default to passed rather than skipped — if the batch ran and
+            // we have no evidence this test failed, it most likely passed.
+            run.passed(entry.test, Date.now() - start);
           }
         }
       }

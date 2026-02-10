@@ -90,6 +90,7 @@ vi.mock('./services/CoverageService', () => ({
 vi.mock('./services/SpockErrorParser', () => ({
   extractErrorForTest: vi.fn((_output: string, _className: string, _testName: string) => 'Test failed'),
   hasErrorForClass: vi.fn(() => false),
+  hasErrorForTest: vi.fn(() => false),
   parseTestError: vi.fn(() => ({ error: 'Test failed' })),
 }));
 
@@ -452,7 +453,8 @@ describe('SpockTestController', () => {
       const leaf2: MockItem = { type: 'test', children: [], tags: [{ id: 'runnable' }] };
       const classNode: MockItem = { type: 'class', children: [leaf1, leaf2], tags: [{ id: 'runnable' }] };
       const fileNode: MockItem = { type: 'file', children: [classNode], tags: [{ id: 'runnable' }] };
-      const projectNode: MockItem = { type: 'project', children: [fileNode], tags: [{ id: 'runnable' }] };
+      const packageNode: MockItem = { type: 'package', children: [fileNode], tags: [{ id: 'runnable' }] };
+      const projectNode: MockItem = { type: 'project', children: [packageNode], tags: [{ id: 'runnable' }] };
 
       const leafTests: MockItem[] = [];
       const queue: MockItem[] = [projectNode];
@@ -462,6 +464,7 @@ describe('SpockTestController', () => {
         switch (item.type) {
           case 'project':
           case 'subproject':
+          case 'package':
           case 'file':
           case 'class':
             item.children.forEach((child) => queue.push(child));

@@ -207,3 +207,31 @@ export function hasErrorForClass(output: string, className: string): boolean {
   }
   return false;
 }
+
+/**
+ * Check whether the console output contains a failure line for a specific test.
+ * More precise than {@link hasErrorForClass}: only returns true when the output
+ * contains a FAILED/FAILURE/ERROR line mentioning the test name together with
+ * the class name.
+ *
+ * Handles both Gradle format ("ClassName > testName FAILED") and Maven format
+ * (lines mentioning both class and test name alongside a failure keyword).
+ */
+export function hasErrorForTest(output: string, className: string, testName: string): boolean {
+  if (!output || !testName) { return false; }
+  const lines = output.split('\n');
+  for (const line of lines) {
+    // The line must reference the specific test name AND contain a failure keyword.
+    // We match the test name AND either the class name or a failure keyword pattern
+    // to avoid false positives from generic error text.
+    if (line.includes(testName) && (line.includes('FAILED') || line.includes('FAILURE') || line.includes('[ERROR]'))) {
+      // Extra check: the class name should also appear on the same line
+      // (either FQN or simple name) to avoid cross-class false positives.
+      const simpleName = className.includes('.') ? className.substring(className.lastIndexOf('.') + 1) : className;
+      if (line.includes(className) || line.includes(simpleName)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
