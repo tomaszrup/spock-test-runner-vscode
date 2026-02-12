@@ -596,7 +596,7 @@ describe('TestRunCoordinator', () => {
       expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
     });
 
-    it('should report passing test as passed even when batch fails overall', async () => {
+    it('should report unresolved test as failed when build fails before test execution', async () => {
       const run = createMockRun();
       const passedSpy = run.passed; // save ref before createTrackingRun replaces it
       const failedSpy = run.failed;
@@ -617,11 +617,46 @@ describe('TestRunCoordinator', () => {
       const request = new vscode.TestRunRequest([test1]);
       await coordinator.runHandler(false, request, token);
 
-      // Should be passed (not 'skipped' or 'failed'), because there's no
-      // evidence this specific test failed.
-      expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
-      expect(failedSpy).not.toHaveBeenCalled();
+      expect(passedSpy).not.toHaveBeenCalled();
+      expect(failedSpy).toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: expect.stringContaining('Build failed before test execution') }),
+        expect.any(Number),
+      );
       expect(skippedSpy).not.toHaveBeenCalled();
+    });
+
+    it('should ignore XML results when build failure is detected', async () => {
+      const run = createMockRun();
+      const passedSpy = run.passed;
+      const failedSpy = run.failed;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'passing test', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'Spec', testName: 'passing test' });
+
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: '> Task :compileJava FAILED\nBUILD FAILED',
+      });
+
+      // Simulate stale/previous XML that would otherwise mark this test as passed.
+      resultParser.parseClassTestResults.mockResolvedValue(
+        new Map([
+          ['passing test', { success: true, skipped: false }],
+        ]),
+      );
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      expect(passedSpy).not.toHaveBeenCalled();
+      expect(failedSpy).toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: expect.stringContaining('Build failed before test execution') }),
+        expect.any(Number),
+      );
     });
   });
 });

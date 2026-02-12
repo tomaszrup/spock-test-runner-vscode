@@ -1091,37 +1091,73 @@ describe('SpockTestController', () => {
   // ── Discovery concurrency guard ────────────────────────────────────
 
   describe('discovery concurrency', () => {
-    it('should skip concurrent discoverAllTests calls', async () => {
-      // Use a long-running findFiles to simulate slow discovery
-      let findFilesCallCount = 0;
-      const findFilesSpy = vi.fn(async () => {
-        findFilesCallCount++;
-        // Add a small delay so the second call can arrive while the first is pending
-        await new Promise(resolve => setTimeout(resolve, 10));
-        return [];
-      });
+    it('should not re-run full discovery when resolveHandler(null) is called after startup discovery', async () => {
+      const findFilesSpy = vi.fn(async () => []);
 
-      const { controller, logger } = createController({ findFiles: findFilesSpy });
+      createController({ findFiles: findFilesSpy });
 
-      // Wait for initial constructor-initiated discovery to start (but not finish)
-      await new Promise(process.nextTick);
-
-      // Trigger resolveHandler(null) which also calls discoverAllTests
-      const registeredController = (vscode.tests as any)._controllers[0];
-      registeredController.resolveHandler!(null);
-
-      // Wait for everything to settle
-      await new Promise(resolve => setTimeout(resolve, 50));
-      for (let i = 0; i < 30; i++) {
+      for (let i = 0; i < 20; i++) {
         await new Promise(process.nextTick);
       }
 
-      // The guard should have prevented the second findFiles call.
-      // findFiles may be called once (from the constructor-initiated discovery).
-      // The resolveHandler call should be skipped.
+      const registeredController = (vscode.tests as any)._controllers[0];
+      await registeredController.resolveHandler!(null);
+
+      expect(findFilesSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should wait for startup discovery instead of launching a second full discovery', async () => {
+      const findFilesSpy = vi.fn(async () => {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        return [];
+      });
+
+      const { logger } = createController({ findFiles: findFilesSpy });
+      await new Promise(process.nextTick);
+
+      const registeredController = (vscode.tests as any)._controllers[0];
+      await registeredController.resolveHandler!(null);
+
+      expect(findFilesSpy).toHaveBeenCalledTimes(1);
       const logCalls = logger.appendLine.mock.calls.map((c: any[]) => c[0]);
-      const skippedMsg = logCalls.find((c: string) => c.includes('already in progress'));
-      expect(skippedMsg).toBeDefined();
+      expect(logCalls.some((c: string) => c.includes('Waiting for ongoing full discovery'))).toBe(true);
+    });
+
+    it('should force full discovery on refreshHandler when not cancelled', async () => {
+      const findFilesSpy = vi.fn(async () => []);
+      createController({ findFiles: findFilesSpy });
+
+      for (let i = 0; i < 20; i++) {
+        await new Promise(process.nextTick);
+      }
+
+      const registeredController = (vscode.tests as any)._controllers[0];
+      await registeredController.refreshHandler!({ isCancellationRequested: false });
+
+      expect(findFilesSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('should force full discovery on manual reload command', async () => {
+      const registeredCommands = new Map<string, (...args: any[]) => any>();
+      const originalRegister = vscode.commands.registerCommand;
+      try {
+        (vscode.commands as any).registerCommand = vi.fn((command: string, callback: (...args: any[]) => any) => {
+          registeredCommands.set(command, callback);
+          return { dispose: () => {} };
+        });
+
+        const findFilesSpy = vi.fn(async () => []);
+        createController({ findFiles: findFilesSpy });
+
+        for (let i = 0; i < 20; i++) {
+          await new Promise(process.nextTick);
+        }
+
+        await registeredCommands.get('spock-test-runner.reloadTests')!();
+        expect(findFilesSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        (vscode.commands as any).registerCommand = originalRegister;
+      }
     });
   });
 });

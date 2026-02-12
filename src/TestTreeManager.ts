@@ -62,6 +62,12 @@ export class TestTreeManager {
         });
         watcher.onDidDelete(uri => {
           this.logger.appendLine(`TestTreeManager: File deleted: ${uri.fsPath}`);
+          for (const [, subItem] of this.subProjectItems) {
+            subItem.children.delete(uri.toString());
+          }
+          for (const [, projectItem] of this.projectItems) {
+            projectItem.children.delete(uri.toString());
+          }
           // Remove file from package nodes, then clean up empty packages
           for (const [pkgKey, pkgItem] of this.packageItems) {
             pkgItem.children.delete(uri.toString());

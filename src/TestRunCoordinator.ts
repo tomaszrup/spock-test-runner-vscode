@@ -450,10 +450,12 @@ export class TestRunCoordinator {
       return;
     }
 
+    const hasBuildFailureSignal = this.hasBuildFailureSignal(combinedResult.output);
+
     // Resolve remaining results through multiple strategies
     await this.resolveDataDrivenResults(testLookup, combinedResult, run, projectRoot, buildTool, start);
-    await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start);
-    this.resolveFinalFallback(testLookup, combinedResult, run, start);
+    await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start, hasBuildFailureSignal);
+    this.resolveFinalFallback(testLookup, combinedResult, run, start, hasBuildFailureSignal);
 
     // Attach coverage data
     if (coverage) {
@@ -508,10 +510,12 @@ export class TestRunCoordinator {
       return;
     }
 
+    const hasBuildFailureSignal = this.hasBuildFailureSignal(result.output);
+
     // Resolve remaining results through multiple strategies
     await this.resolveDataDrivenResults(testLookup, result, run, projectRoot, buildTool, start);
-    await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start);
-    this.resolveFinalFallback(testLookup, result, run, start);
+    await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start, hasBuildFailureSignal);
+    this.resolveFinalFallback(testLookup, result, run, start, hasBuildFailureSignal);
 
     // Attach coverage data
     if (coverage) {
@@ -665,7 +669,13 @@ export class TestRunCoordinator {
     projectRoot: string,
     buildTool: BuildTool,
     start: number,
+    hasBuildFailureSignal: boolean,
   ): Promise<void> {
+    if (hasBuildFailureSignal) {
+      this.logger.appendLine('TestRunCoordinator: Build failure detected — ignoring XML reports for unresolved tests');
+      return;
+    }
+
     const unresolvedClasses = new Set<string>();
     for (const [, entry] of testLookup) {
       if (!entry.resolved && entry.data.className) {
@@ -698,6 +708,7 @@ export class TestRunCoordinator {
     result: any,
     run: vscode.TestRun,
     start: number,
+    hasBuildFailureSignal: boolean,
   ): void {
     for (const [, entry] of testLookup) {
       if (!entry.resolved) {
@@ -712,6 +723,12 @@ export class TestRunCoordinator {
           if (testError) {
             const errorMessage = extractErrorForTest(result.output, entry.data.className!, entry.data.testName!);
             run.failed(entry.test, this.resultProcessor.createTestMessage(errorMessage), Date.now() - start);
+          } else if (hasBuildFailureSignal) {
+            run.failed(
+              entry.test,
+              this.resultProcessor.createTestMessage('Build failed before test execution. See build output for details.'),
+              Date.now() - start,
+            );
           } else {
             // No failure detected for this specific test.
             // Default to passed rather than skipped — if the batch ran and
@@ -721,6 +738,19 @@ export class TestRunCoordinator {
         }
       }
     }
+  }
+
+  private hasBuildFailureSignal(output: string): boolean {
+    if (!output) {
+      return false;
+    }
+
+    return (
+      /\bBUILD FAILED\b/i.test(output)
+      || /Execution failed for task\s+['"]?:[^'"\s]+['"]?/i.test(output)
+      || /\bCompilation failed; see the compiler error output for details\b/i.test(output)
+      || /^\s*>\s*Task\s+:[^\n\r]+\s+FAILED\s*$/im.test(output)
+    );
   }
 
   private async attachCoverageData(rootProject: string, run: vscode.TestRun): Promise<void> {

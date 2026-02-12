@@ -20,6 +20,8 @@ export class SpockTestController {
   private treeManager: TestTreeManager;
   private resultProcessor: ResultProcessor;
   private runCoordinator: TestRunCoordinator;
+  private initialDiscoveryCompleted = false;
+  private fullDiscoveryPromise: Promise<void> | undefined;
 
   constructor(context: vscode.ExtensionContext, logger: vscode.LogOutputChannel) {
     this.logger = logger;
@@ -68,7 +70,7 @@ export class SpockTestController {
 
     // Automatically discover tests on startup
     this.logger.appendLine('SpockTestController: Starting automatic test discovery...');
-    this.treeManager.discoverAllTests().catch(error => {
+    this.ensureFullDiscovery(true, 'startup').catch(error => {
       this.logger.appendLine(`SpockTestController: Error during automatic discovery: ${error}`);
     });
 
@@ -81,8 +83,7 @@ export class SpockTestController {
       this.logger.appendLine(`SpockTestController: resolveHandler called with test: ${test ? test.id : 'null'}`);
 
       if (!test) {
-        this.logger.appendLine('SpockTestController: Discovering all tests (reload triggered)...');
-        await this.treeManager.discoverAllTests();
+        await this.ensureFullDiscovery(false, 'resolveHandler');
       } else {
         const data = this.treeManager.testData.get(test);
         if (data?.type === 'project' || data?.type === 'subproject' || data?.type === 'package') {
@@ -99,9 +100,45 @@ export class SpockTestController {
       if (token.isCancellationRequested) {
         return;
       }
-      await this.treeManager.discoverAllTests();
+      await this.ensureFullDiscovery(true, 'refreshHandler');
       this.logger.appendLine('SpockTestController: refreshHandler completed');
     };
+  }
+
+  private async ensureFullDiscovery(force: boolean, trigger: string): Promise<void> {
+    if (!force) {
+      if (this.initialDiscoveryCompleted) {
+        this.logger.appendLine(`SpockTestController: Skipping full discovery for ${trigger} (already completed)`);
+        return;
+      }
+      if (this.fullDiscoveryPromise) {
+        this.logger.appendLine(`SpockTestController: Waiting for ongoing full discovery (${trigger})`);
+        await this.fullDiscoveryPromise;
+        return;
+      }
+    } else if (this.fullDiscoveryPromise) {
+      this.logger.appendLine(`SpockTestController: Waiting for ongoing full discovery before forced reload (${trigger})`);
+      await this.fullDiscoveryPromise;
+    }
+
+    this.logger.appendLine(`SpockTestController: Discovering all tests (${trigger})...`);
+
+    const discoveryPromise = this.treeManager.discoverAllTests()
+      .then(() => {
+        this.initialDiscoveryCompleted = true;
+      })
+      .catch(error => {
+        this.initialDiscoveryCompleted = false;
+        throw error;
+      })
+      .finally(() => {
+        if (this.fullDiscoveryPromise === discoveryPromise) {
+          this.fullDiscoveryPromise = undefined;
+        }
+      });
+
+    this.fullDiscoveryPromise = discoveryPromise;
+    await discoveryPromise;
   }
 
   private createRunProfiles(): void {
@@ -152,7 +189,7 @@ export class SpockTestController {
   private registerCommands(context: vscode.ExtensionContext): void {
     const reloadCommand = vscode.commands.registerCommand('spock-test-runner.reloadTests', async () => {
       this.logger.appendLine('SpockTestController: Manual reload command triggered');
-      await this.treeManager.discoverAllTests();
+      await this.ensureFullDiscovery(true, 'manualReloadCommand');
       this.logger.appendLine('SpockTestController: Manual reload completed');
     });
 

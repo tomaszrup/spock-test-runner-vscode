@@ -98,6 +98,119 @@ describe('TestTreeManager', () => {
     );
   });
 
+  // ── File watcher behavior ───────────────────────────────────────
+
+  describe('setupFileWatchers', () => {
+    it('should discover tests when a watched file is created', async () => {
+      const callbacks: {
+        create?: (uri: vscode.Uri) => Promise<void> | void;
+        change?: (uri: vscode.Uri) => Promise<void> | void;
+        delete?: (uri: vscode.Uri) => void;
+      } = {};
+
+      const originalCreateWatcher = vscode.workspace.createFileSystemWatcher;
+      try {
+        (vscode.workspace as any).createFileSystemWatcher = vi.fn(() => ({
+          onDidCreate: (cb: (uri: vscode.Uri) => Promise<void>) => {
+            callbacks.create = cb;
+            return { dispose: () => {} };
+          },
+          onDidChange: (cb: (uri: vscode.Uri) => Promise<void>) => {
+            callbacks.change = cb;
+            return { dispose: () => {} };
+          },
+          onDidDelete: (cb: (uri: vscode.Uri) => void) => {
+            callbacks.delete = cb;
+            return { dispose: () => {} };
+          },
+          dispose: () => {},
+        }));
+
+        const discoverSpy = vi.spyOn(manager, 'discoverTestsInFile').mockResolvedValue();
+
+        manager.setupFileWatchers();
+        const newFileUri = vscode.Uri.file('/workspace/project/src/test/groovy/NewSpec.groovy');
+        await callbacks.create?.(newFileUri);
+
+        expect(discoverSpy).toHaveBeenCalledTimes(1);
+        expect(discoverSpy.mock.calls[0][0].uri?.toString()).toBe(newFileUri.toString());
+      } finally {
+        (vscode.workspace as any).createFileSystemWatcher = originalCreateWatcher;
+      }
+    });
+
+    it('should remove deleted file from test tree and cleanup empty grouping nodes', async () => {
+      const callbacks: {
+        create?: (uri: vscode.Uri) => Promise<void> | void;
+        change?: (uri: vscode.Uri) => Promise<void> | void;
+        delete?: (uri: vscode.Uri) => void;
+      } = {};
+
+      const originalCreateWatcher = vscode.workspace.createFileSystemWatcher;
+      try {
+        (vscode.workspace as any).createFileSystemWatcher = vi.fn(() => ({
+          onDidCreate: (cb: (uri: vscode.Uri) => Promise<void>) => {
+            callbacks.create = cb;
+            return { dispose: () => {} };
+          },
+          onDidChange: (cb: (uri: vscode.Uri) => Promise<void>) => {
+            callbacks.change = cb;
+            return { dispose: () => {} };
+          },
+          onDidDelete: (cb: (uri: vscode.Uri) => void) => {
+            callbacks.delete = cb;
+            return { dispose: () => {} };
+          },
+          dispose: () => {},
+        }));
+
+        manager.setupFileWatchers();
+        const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/DeleteMeSpec.groovy');
+        await manager.getOrCreateFile(fileUri);
+
+        let fileFoundBeforeDelete = false;
+        manager.projectItems.forEach(projectItem => {
+          projectItem.children.forEach((child: any) => {
+            if (child.id === fileUri.toString()) {
+              fileFoundBeforeDelete = true;
+              return;
+            }
+            child.children?.forEach((nested: any) => {
+              if (nested.id === fileUri.toString()) {
+                fileFoundBeforeDelete = true;
+              }
+            });
+          });
+        });
+        expect(fileFoundBeforeDelete).toBe(true);
+        expect(manager.projectItems.size).toBeGreaterThan(0);
+
+        callbacks.delete?.(fileUri);
+
+        let fileFoundAfterDelete = false;
+        manager.projectItems.forEach(projectItem => {
+          projectItem.children.forEach((child: any) => {
+            if (child.id === fileUri.toString()) {
+              fileFoundAfterDelete = true;
+              return;
+            }
+            child.children?.forEach((nested: any) => {
+              if (nested.id === fileUri.toString()) {
+                fileFoundAfterDelete = true;
+              }
+            });
+          });
+        });
+        expect(fileFoundAfterDelete).toBe(false);
+        expect(manager.packageItems.size).toBe(0);
+        expect(manager.subProjectItems.size).toBe(0);
+        expect(manager.projectItems.size).toBe(0);
+      } finally {
+        (vscode.workspace as any).createFileSystemWatcher = originalCreateWatcher;
+      }
+    });
+  });
+
   // ── parseTestsInFile ─────────────────────────────────────────────
 
   describe('parseTestsInFile', () => {
