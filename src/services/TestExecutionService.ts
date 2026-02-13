@@ -18,6 +18,7 @@ export class TestExecutionService {
     run: vscode.TestRun;
     testItems: vscode.TestItem[];
     debug: boolean;
+    debugPort?: number;
     onOutputLine?: (line: string) => void;
     token?: vscode.CancellationToken;
   }): Promise<{success: boolean; output: string}> {
@@ -31,13 +32,16 @@ export class TestExecutionService {
 
       if (options.debug) {
         const batchCfg = ConfigurationService.getConfig();
-        let batchDebugPort = batchCfg.debugPort;
-        try {
-          batchDebugPort = await this.debugService.findFreePort(batchCfg.debugPort);
-          this.logger.appendLine(`TestExecutionService: Batch using debug port ${batchDebugPort}`);
-        } catch (err) {
-          this.logger.appendLine(`TestExecutionService: Could not find free debug port for batch: ${err}`);
+        let batchDebugPort = options.debugPort;
+        if (batchDebugPort === undefined) {
+          batchDebugPort = batchCfg.debugPort;
+          try {
+            batchDebugPort = await this.debugService.findFreePort(batchCfg.debugPort);
+          } catch (err) {
+            this.logger.appendLine(`TestExecutionService: Could not find free debug port for batch: ${err}`);
+          }
         }
+        this.logger.appendLine(`TestExecutionService: Batch using debug port ${batchDebugPort}`);
         // Don't await — let it connect in the background while Gradle starts.
         // DebugService.waitForJvmDebugPort polls until the configured port is open.
         this.debugService.startDebugSession({

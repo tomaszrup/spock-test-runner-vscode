@@ -131,7 +131,7 @@ Workspace
 
 1. Set breakpoints by clicking the gutter in your test files
 2. Click the debug icon next to a test or class in the Test Explorer
-3. The extension automatically attaches to the JVM on port **5005**
+3. The extension automatically attaches to the JVM on your configured debug port (default **5005**); if that port is busy, it selects a nearby free port for the run.
 
 ## Configuration
 
@@ -161,7 +161,7 @@ Gradle is checked first. If both `build.gradle` and `pom.xml` exist, Gradle take
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `spockTestRunner.debugPort` | `number` | `5005` | Port number used by the JVM debug agent (JDWP) |
-| `spockTestRunner.testTimeout` | `number` | `300` | Maximum time (in seconds) to wait for a single test execution |
+| `spockTestRunner.testTimeout` | `number` | `300` | Maximum time (in seconds) to wait for each spawned test process (batch run) |
 | `spockTestRunner.debugConnectionTimeout` | `number` | `60` | Maximum time (in seconds) to wait for the JVM debug port |
 | `spockTestRunner.debugRetries` | `number` | `3` | Number of times to retry attaching the debugger |
 | `spockTestRunner.additionalGradleArgs` | `string[]` | `[]` | Additional CLI arguments passed to every Gradle invocation |
@@ -311,7 +311,7 @@ The `.vscode/launch.json` provides:
 | Problem | Solution |
 |---|---|
 | Tests not discovered | Ensure test classes extend `Specification` and your build tool is configured correctly |
-| Debug not working | Install the Java Extension Pack; verify port 5005 is free |
+| Debug not working | Install the Java Extension Pack; verify your configured debug port is not blocked by local firewall/security tools |
 | Gradle errors | Ensure `gradlew` (or `gradle`) is on your PATH and build files are valid |
 | Maven tests not running | Verify `maven-surefire-plugin` is configured with `<include>` patterns for `*Spec.java`. For `pom`-packaged modules, add an explicit `<execution>` binding to the `test` phase (see [Maven requirements](#maven-specific-requirements)) |
 | Maven BUILD SUCCESS but 0 tests | The Surefire plugin is not bound to the lifecycle — see the Maven requirements section above |

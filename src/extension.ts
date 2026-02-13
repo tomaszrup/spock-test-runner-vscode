@@ -13,6 +13,9 @@ export function activate(context: vscode.ExtensionContext) {
     new SpockTestController(context, logger);
   } else {
     logger.appendLine('Workspace is not trusted — deferring controller creation.');
+    void vscode.window.showWarningMessage(
+      'Spock Test Runner is inactive in untrusted workspaces. Trust this workspace to enable test discovery and execution.',
+    );
     const trustDisposable = vscode.workspace.onDidGrantWorkspaceTrust(() => {
       logger.appendLine('Workspace trust granted — creating test controller.');
       new SpockTestController(context, logger);

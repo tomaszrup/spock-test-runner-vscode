@@ -32,6 +32,7 @@ const mockStartDebugSession = vi.fn().mockResolvedValue(undefined);
 vi.mock('./DebugService', () => {
   return {
     DebugService: class MockDebugService {
+      findFreePort = vi.fn(async (preferredPort: number) => preferredPort);
       startDebugSession = mockStartDebugSession;
     },
   };
@@ -258,6 +259,7 @@ describe('TestExecutionService', () => {
         testItems: [],
         debug: true,
       });
+      await Promise.resolve();
       fakeProc.emit('close', 0);
       await promise;
       expect(mockStartDebugSession).toHaveBeenCalled();

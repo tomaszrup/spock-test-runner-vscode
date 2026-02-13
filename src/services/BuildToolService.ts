@@ -665,8 +665,9 @@ export class BuildToolService {
 
     if (debug) {
       const cfg = ConfigurationService.getConfig();
+      const port = debugPort ?? cfg.debugPort;
       args.push('--debug-jvm');
-      args.push(`-Dorg.gradle.jvmargs=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${cfg.debugPort}`);
+      args.push(`-Dorg.gradle.jvmargs=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${port}`);
     }
 
     const extraArgs = validateExtraArgs(ConfigurationService.getConfig().additionalGradleArgs, 'gradle', logger);

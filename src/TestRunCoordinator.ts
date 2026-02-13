@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { IBuildToolService, BuildToolService } from './services/BuildToolService';
+import { ConfigurationService } from './services/ConfigurationService';
 import { CoverageService } from './services/CoverageService';
+import { DebugService } from './services/DebugService';
 import { TestExecutionService } from './services/TestExecutionService';
 import { TestResultParser } from './services/TestResultParser';
 import { extractErrorForTest, hasErrorForTest } from './services/SpockErrorParser';
@@ -19,6 +21,9 @@ export class TestRunCoordinator {
    * survives tree rebuilds (where IDs change).
    */
   public lastFailedTests = new Set<string>();
+  private debugService: DebugService;
+  private notifiedBuildFailure = false;
+  private notifiedCoverageMissing = false;
 
   constructor(
     private controller: vscode.TestController,
@@ -29,7 +34,9 @@ export class TestRunCoordinator {
     private treeManager: TestTreeManager,
     private resultProcessor: ResultProcessor,
     private buildToolService: IBuildToolService,
-  ) {}
+  ) {
+    this.debugService = new DebugService(logger);
+  }
 
   // ── Continuous run handler ─────────────────────────────────────────
 
@@ -110,6 +117,7 @@ export class TestRunCoordinator {
     const originalFailed = run.failed.bind(run);
     const originalPassed = run.passed.bind(run);
     const originalSkipped = run.skipped.bind(run);
+    const originalErrored = run.errored.bind(run);
     const self = this;
 
     const semanticKey = (test: vscode.TestItem): string | undefined => {
@@ -136,6 +144,12 @@ export class TestRunCoordinator {
       const key = semanticKey(test);
       if (key) { self.lastFailedTests.delete(key); }
       return originalSkipped(test);
+    };
+
+    run.errored = function (test: vscode.TestItem, message: vscode.TestMessage | readonly vscode.TestMessage[], duration?: number) {
+      const key = semanticKey(test);
+      if (key) { self.lastFailedTests.delete(key); }
+      return originalErrored(test, message, duration);
     };
 
     return run;
@@ -205,6 +219,9 @@ export class TestRunCoordinator {
     token: vscode.CancellationToken,
     coverage: boolean = false,
   ): Promise<void> {
+    this.notifiedBuildFailure = false;
+    this.notifiedCoverageMissing = false;
+
     const run = this.controller.createTestRun(request);
     const trackingRun = this.createTrackingRun(run);
 
@@ -292,27 +309,44 @@ export class TestRunCoordinator {
     const totalTests = leafTests.length;
     let completedTests = 0;
     let lastReportedPct = 0;
+    const runDebugPort = await this.resolveRunDebugPort(debug);
+    const runCancellationSource = new vscode.CancellationTokenSource();
+    const upstreamCancellation = token.onCancellationRequested(() => runCancellationSource.cancel());
 
-    await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: 'Running Spock Tests',
-        cancellable: false,
-      },
-      async (progress) => {
-        progress.report({ message: `0 / ${totalTests} tests`, increment: 0 });
+    try {
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'Running Spock Tests',
+          cancellable: true,
+        },
+        async (progress, progressToken) => {
+          const progressCancellation = progressToken.onCancellationRequested(() => {
+            this.logger.appendLine('TestRunCoordinator: Run cancelled from progress notification');
+            runCancellationSource.cancel();
+          });
 
-        for (const [projectRoot, tests] of groups) {
-          if (token.isCancellationRequested) { break; }
-          await this.runBatch(projectRoot, tests, trackingRun, debug, token, coverage);
-          completedTests += tests.length;
-          const pct = Math.round((completedTests / totalTests) * 100);
-          const delta = pct - lastReportedPct;
-          lastReportedPct = pct;
-          progress.report({ message: `${completedTests} / ${totalTests} tests`, increment: delta });
-        }
-      },
-    );
+          try {
+            progress.report({ message: `0 / ${totalTests} tests`, increment: 0 });
+
+            for (const [projectRoot, tests] of groups) {
+              if (runCancellationSource.token.isCancellationRequested) { break; }
+              await this.runBatch(projectRoot, tests, trackingRun, debug, runCancellationSource.token, coverage, runDebugPort);
+              completedTests += tests.length;
+              const pct = Math.round((completedTests / totalTests) * 100);
+              const delta = pct - lastReportedPct;
+              lastReportedPct = pct;
+              progress.report({ message: `${completedTests} / ${totalTests} tests`, increment: delta });
+            }
+          } finally {
+            progressCancellation.dispose();
+          }
+        },
+      );
+    } finally {
+      upstreamCancellation.dispose();
+      runCancellationSource.dispose();
+    }
 
     trackingRun.end();
   }
@@ -326,6 +360,7 @@ export class TestRunCoordinator {
     debug: boolean,
     token: vscode.CancellationToken,
     coverage: boolean = false,
+    debugPort?: number,
   ): Promise<void> {
     const start = Date.now();
 
@@ -356,14 +391,14 @@ export class TestRunCoordinator {
       await this.runGradleBatchWithSplitting(
         testFilters, classTestCounts, testLookup, tests,
         debug, rootProject, subprojectPrefix, coverage, buildTool,
-        run, token, start, projectRoot,
+        run, token, start, projectRoot, debugPort,
       );
     } else {
       // Maven: single batch (uses compact -Dtest= filter)
       await this.runSingleBatch(
         testFilters, testLookup, tests,
         debug, rootProject, subprojectPrefix, coverage, buildTool,
-        run, token, start, projectRoot,
+        run, token, start, projectRoot, debugPort,
       );
     }
   }
@@ -386,10 +421,11 @@ export class TestRunCoordinator {
     token: vscode.CancellationToken,
     start: number,
     projectRoot: string,
+    debugPort?: number,
   ): Promise<void> {
     // Build a "probe" command to get the base args (without --tests entries)
     const probeArgs = await this.buildToolService.buildBatchCommandArgs(
-      [], debug, rootProject, this.logger, subprojectPrefix, coverage, buildTool,
+      [], debug, rootProject, this.logger, subprojectPrefix, coverage, buildTool, debugPort,
     );
 
     // Apply wildcard coalescing first (reduces filter count significantly)
@@ -412,7 +448,7 @@ export class TestRunCoordinator {
       const batchFilters = batches[i];
       const commandArgs = await this.buildToolService.buildBatchCommandArgs(
         batchFilters, debug, rootProject, this.logger, subprojectPrefix, coverage, buildTool,
-        undefined, classTestCounts,
+        debugPort, classTestCounts,
       );
 
       if (batches.length > 1) {
@@ -429,6 +465,7 @@ export class TestRunCoordinator {
         run,
         testItems: tests.map(t => t.test),
         debug,
+        debugPort,
         token,
         onOutputLine: (line: string) => this.handleRealTimeOutputLine(line, testLookup, run, start),
       });
@@ -451,6 +488,9 @@ export class TestRunCoordinator {
     }
 
     const hasBuildFailureSignal = this.hasBuildFailureSignal(combinedResult.output);
+    if (hasBuildFailureSignal) {
+      this.notifyBuildFailure();
+    }
 
     // Resolve remaining results through multiple strategies
     await this.resolveDataDrivenResults(testLookup, combinedResult, run, projectRoot, buildTool, start);
@@ -479,10 +519,12 @@ export class TestRunCoordinator {
     token: vscode.CancellationToken,
     start: number,
     projectRoot: string,
+    debugPort?: number,
   ): Promise<void> {
     // Execute tests
     const commandArgs = await this.buildToolService.buildBatchCommandArgs(
       testFilters, debug, rootProject, this.logger, subprojectPrefix, coverage, buildTool,
+      debugPort,
     );
 
     this.logger.appendLine(`TestRunCoordinator: Running batch of ${tests.length} test(s) in ${projectRoot}${coverage ? ' (with coverage)' : ''}`);
@@ -496,6 +538,7 @@ export class TestRunCoordinator {
       run,
       testItems: tests.map(t => t.test),
       debug,
+      debugPort,
       token,
       onOutputLine: (line: string) => this.handleRealTimeOutputLine(line, testLookup, run, start),
     });
@@ -511,6 +554,9 @@ export class TestRunCoordinator {
     }
 
     const hasBuildFailureSignal = this.hasBuildFailureSignal(result.output);
+    if (hasBuildFailureSignal) {
+      this.notifyBuildFailure();
+    }
 
     // Resolve remaining results through multiple strategies
     await this.resolveDataDrivenResults(testLookup, result, run, projectRoot, buildTool, start);
@@ -732,20 +778,19 @@ export class TestRunCoordinator {
             run.failed(entry.test, this.resultProcessor.createTestMessage(errorMessage), Date.now() - start);
           } else if (hasBuildFailureSignal) {
             const buildFailureMessage = this.extractBuildFailureMessage(result.output);
-            run.failed(
+            run.errored(
               entry.test,
               this.resultProcessor.createTestMessage(buildFailureMessage),
               Date.now() - start,
             );
           } else {
             // Batch failed but we have no per-test failure and no build signal.
-            // Extract whatever we can from the output rather than silently passing.
+            // Treat this as errored (execution uncertainty), never as passed.
             const fallbackMsg = this.extractBuildFailureMessage(result.output);
-            if (fallbackMsg && !fallbackMsg.startsWith('Build failed')) {
-              run.failed(entry.test, this.resultProcessor.createTestMessage(fallbackMsg), Date.now() - start);
-            } else {
-              run.passed(entry.test, Date.now() - start);
-            }
+            const unresolvedMessage = fallbackMsg && !fallbackMsg.startsWith('Build failed')
+              ? fallbackMsg
+              : 'Test execution failed before the result for this test could be determined.';
+            run.errored(entry.test, this.resultProcessor.createTestMessage(unresolvedMessage), Date.now() - start);
           }
         }
       }
@@ -862,6 +907,45 @@ export class TestRunCoordinator {
       this.logger.appendLine(`TestRunCoordinator: Added ${totalEntries} file coverage entries from ${reports.length} report(s)`);
     } else {
       this.logger.appendLine('TestRunCoordinator: No JaCoCo XML reports found — coverage data unavailable');
+      if (!this.notifiedCoverageMissing) {
+        this.notifiedCoverageMissing = true;
+        void vscode.window.showInformationMessage(
+          'Spock Test Runner: Coverage data is unavailable because no JaCoCo XML report was found for this run.',
+        );
+      }
     }
+  }
+
+  private async resolveRunDebugPort(debug: boolean): Promise<number | undefined> {
+    if (!debug) {
+      return undefined;
+    }
+
+    const cfg = ConfigurationService.getConfig();
+    try {
+      const resolvedPort = await this.debugService.findFreePort(cfg.debugPort);
+      if (resolvedPort !== cfg.debugPort) {
+        void vscode.window.showInformationMessage(
+          `Spock Test Runner: Preferred debug port ${cfg.debugPort} is in use; using ${resolvedPort} for this run.`,
+        );
+      }
+      return resolvedPort;
+    } catch (error) {
+      this.logger.appendLine(`TestRunCoordinator: Could not find free debug port: ${error}`);
+      void vscode.window.showWarningMessage(
+        `Spock Test Runner: Could not find a free debug port near ${cfg.debugPort}; trying configured port ${cfg.debugPort}.`,
+      );
+      return cfg.debugPort;
+    }
+  }
+
+  private notifyBuildFailure(): void {
+    if (this.notifiedBuildFailure) {
+      return;
+    }
+    this.notifiedBuildFailure = true;
+    void vscode.window.showWarningMessage(
+      'Spock Test Runner: Build failed before all test results were available. Some tests are marked as errored.',
+    );
   }
 }

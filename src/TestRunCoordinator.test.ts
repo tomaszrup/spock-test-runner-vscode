@@ -55,6 +55,7 @@ function createMockRun() {
   return {
     passed: vi.fn(),
     failed: vi.fn(),
+    errored: vi.fn(),
     skipped: vi.fn(),
     started: vi.fn(),
     appendOutput: vi.fn(),
@@ -596,10 +597,10 @@ describe('TestRunCoordinator', () => {
       expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
     });
 
-    it('should report unresolved test as failed when build fails before test execution', async () => {
+    it('should report unresolved test as errored when build fails before test execution', async () => {
       const run = createMockRun();
       const passedSpy = run.passed; // save ref before createTrackingRun replaces it
-      const failedSpy = run.failed;
+      const erroredSpy = run.errored;
       const skippedSpy = run.skipped;
       controller.createTestRun = vi.fn(() => run);
 
@@ -618,7 +619,7 @@ describe('TestRunCoordinator', () => {
       await coordinator.runHandler(false, request, token);
 
       expect(passedSpy).not.toHaveBeenCalled();
-      expect(failedSpy).toHaveBeenCalledWith(
+      expect(erroredSpy).toHaveBeenCalledWith(
         test1,
         expect.objectContaining({ message: expect.stringContaining('Could not compile test classes') }),
         expect.any(Number),
@@ -629,7 +630,7 @@ describe('TestRunCoordinator', () => {
     it('should ignore XML results when build failure is detected', async () => {
       const run = createMockRun();
       const passedSpy = run.passed;
-      const failedSpy = run.failed;
+      const erroredSpy = run.errored;
       controller.createTestRun = vi.fn(() => run);
 
       const test1 = controller.createTestItem('t1', 'passing test', vscode.Uri.file('/workspace/project/spec.groovy'));
@@ -652,7 +653,7 @@ describe('TestRunCoordinator', () => {
       await coordinator.runHandler(false, request, token);
 
       expect(passedSpy).not.toHaveBeenCalled();
-      expect(failedSpy).toHaveBeenCalledWith(
+      expect(erroredSpy).toHaveBeenCalledWith(
         test1,
         expect.objectContaining({ message: expect.stringContaining('Execution failed for task :compileJava') }),
         expect.any(Number),
@@ -675,6 +676,7 @@ describe('TestRunCoordinator', () => {
 
       const run = createMockRun();
       const failedSpy = run.failed;
+      const erroredSpy = run.errored;
       controller.createTestRun = vi.fn(() => run);
 
       const test1 = controller.createTestItem('t1', 'should add', vscode.Uri.file('/workspace/project/spec.groovy'));
@@ -706,7 +708,7 @@ describe('TestRunCoordinator', () => {
         expect.objectContaining({ message: expect.stringContaining('Condition not satisfied') }),
         expect.any(Number),
       );
-      expect(failedSpy).toHaveBeenCalledWith(
+      expect(erroredSpy).toHaveBeenCalledWith(
         test2,
         expect.objectContaining({ message: expect.stringContaining('Could not compile test classes') }),
         expect.any(Number),
@@ -719,7 +721,7 @@ describe('TestRunCoordinator', () => {
 
     it('should use build failure stack trace/cause block instead of generic fallback', async () => {
       const run = createMockRun();
-      const failedSpy = run.failed;
+      const erroredSpy = run.errored;
       controller.createTestRun = vi.fn(() => run);
 
       const test1 = controller.createTestItem('t1', 'passing test', vscode.Uri.file('/workspace/project/spec.groovy'));
@@ -743,17 +745,17 @@ describe('TestRunCoordinator', () => {
       const request = new vscode.TestRunRequest([test1]);
       await coordinator.runHandler(false, request, token);
 
-      expect(failedSpy).toHaveBeenCalledWith(
+      expect(erroredSpy).toHaveBeenCalledWith(
         test1,
         expect.objectContaining({ message: expect.stringContaining('Execution failed for task :compileJava.') }),
         expect.any(Number),
       );
-      expect(failedSpy).toHaveBeenCalledWith(
+      expect(erroredSpy).toHaveBeenCalledWith(
         test1,
         expect.objectContaining({ message: expect.stringContaining('Caused by: java.lang.RuntimeException: Failed to load config') }),
         expect.any(Number),
       );
-      expect(failedSpy).not.toHaveBeenCalledWith(
+      expect(erroredSpy).not.toHaveBeenCalledWith(
         test1,
         expect.objectContaining({ message: 'Build failed before test execution.' }),
         expect.any(Number),
@@ -762,7 +764,7 @@ describe('TestRunCoordinator', () => {
 
     it('should skip generic compiler-output hint and show concrete compiler error', async () => {
       const run = createMockRun();
-      const failedSpy = run.failed;
+      const erroredSpy = run.errored;
       controller.createTestRun = vi.fn(() => run);
 
       const test1 = controller.createTestItem('t1', 'passing test', vscode.Uri.file('/workspace/project/spec.groovy'));
@@ -783,12 +785,12 @@ describe('TestRunCoordinator', () => {
       const request = new vscode.TestRunRequest([test1]);
       await coordinator.runHandler(false, request, token);
 
-      expect(failedSpy).toHaveBeenCalledWith(
+      expect(erroredSpy).toHaveBeenCalledWith(
         test1,
         expect.objectContaining({ message: expect.stringContaining('unable to resolve class MissingType') }),
         expect.any(Number),
       );
-      expect(failedSpy).not.toHaveBeenCalledWith(
+      expect(erroredSpy).not.toHaveBeenCalledWith(
         test1,
         expect.objectContaining({ message: expect.stringContaining('Compilation failed; see the compiler error output for details') }),
         expect.any(Number),
