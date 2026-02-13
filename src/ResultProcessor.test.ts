@@ -166,6 +166,41 @@ describe('ResultProcessor', () => {
       expect(run.failed).toHaveBeenCalledWith(test, expect.anything(), undefined);
     });
 
+    it('should avoid generic Test failed and surface concrete compiler cause when available', async () => {
+      const run = createMockRun();
+      const test = controller.createTestItem('t1', 'test one', vscode.Uri.file('/test.groovy'));
+      const data = { type: 'test' as const, className: 'OtherTest', testName: 'test one', isDataDriven: true };
+
+      parser.parseTestResults.mockResolvedValue([]);
+
+      await processor.handleDataDrivenTestResults(
+        test,
+        data,
+        {
+          success: false,
+          output: [
+            '> Task :compileTestGroovy FAILED',
+            '> Compilation failed; see the compiler error output for details.',
+            'C:/workspace/src/test/groovy/com/other/OtherTest.groovy: 4: unable to resolve class com.example.BowlingGame',
+            'BUILD FAILED',
+          ].join('\n'),
+        },
+        run as any,
+        '/ws',
+      );
+
+      expect(run.failed).toHaveBeenCalledWith(
+        test,
+        expect.objectContaining({ message: expect.stringContaining('unable to resolve class com.example.BowlingGame') }),
+        undefined,
+      );
+      expect(run.failed).not.toHaveBeenCalledWith(
+        test,
+        expect.objectContaining({ message: 'Test failed' }),
+        undefined,
+      );
+    });
+
     it('should create iteration items when iterations are found', async () => {
       const run = createMockRun();
       const testUri = vscode.Uri.file('/test.groovy');

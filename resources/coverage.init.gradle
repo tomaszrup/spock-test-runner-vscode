@@ -3,7 +3,7 @@
 allprojects {
   apply plugin: 'jacoco'
 
-  tasks.matching { it.name == "test" || it instanceof Test }.configureEach {
+  tasks.matching { it instanceof Test }.configureEach {
     // Force test tasks to run (same as force-tests.init.gradle)
     outputs.upToDateWhen { false }
 

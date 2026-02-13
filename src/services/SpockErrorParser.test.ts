@@ -67,7 +67,7 @@ describe('SpockErrorParser', () => {
       expect(extractErrorForTest('', 'MySpec', 'test')).toBe('Test failed');
     });
 
-    it('should capture condition block for a specific class', () => {
+    it('should capture condition block for a specific class and test', () => {
       const output = [
         'MySpec > should add FAILED',
         '',
@@ -82,6 +82,26 @@ describe('SpockErrorParser', () => {
       expect(result).toContain('Condition not satisfied');
     });
 
+    it('should use strict class+test scoping when multiple failures exist', () => {
+      const output = [
+        'MySpec > should add FAILED',
+        'Condition not satisfied:',
+        '  sum == 5',
+        '  |   |',
+        '  4   false',
+        '',
+        'MySpec > should subtract FAILED',
+        'Condition not satisfied:',
+        '  diff == 1',
+        '  |    |',
+        '  2    false',
+      ].join('\n');
+
+      const result = extractErrorForTest(output, 'MySpec', 'should subtract');
+      expect(result).toContain('diff == 1');
+      expect(result).not.toContain('sum == 5');
+    });
+
     it('should capture groovy stack trace lines', () => {
       const output = [
         'MySpec > test FAILED',
@@ -91,10 +111,10 @@ describe('SpockErrorParser', () => {
       expect(result).toContain('MySpec.groovy:10');
     });
 
-    it('should report generic failure when only FAILED line is found', () => {
+    it('should return concrete FAILED line when no detailed block is found', () => {
       const output = 'MySpec > test FAILED\nBUILD FAILED';
       const result = extractErrorForTest(output, 'MySpec', 'test');
-      expect(result).toContain('FAILED');
+      expect(result).toBe('MySpec > test FAILED');
     });
 
     it('should return "Test failed" for unrelated output', () => {

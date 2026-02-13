@@ -3,7 +3,7 @@ import { IBuildToolService, BuildToolService } from './services/BuildToolService
 import { CoverageService } from './services/CoverageService';
 import { TestExecutionService } from './services/TestExecutionService';
 import { TestResultParser } from './services/TestResultParser';
-import { extractErrorForTest, hasErrorForClass, hasErrorForTest } from './services/SpockErrorParser';
+import { extractErrorForTest, hasErrorForTest } from './services/SpockErrorParser';
 import { TestData, BuildTool } from './types';
 import { TestTreeManager } from './TestTreeManager';
 import { ResultProcessor } from './ResultProcessor';
@@ -454,7 +454,7 @@ export class TestRunCoordinator {
 
     // Resolve remaining results through multiple strategies
     await this.resolveDataDrivenResults(testLookup, combinedResult, run, projectRoot, buildTool, start);
-    await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start, hasBuildFailureSignal);
+    await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start, hasBuildFailureSignal, combinedResult.output);
     this.resolveFinalFallback(testLookup, combinedResult, run, start, hasBuildFailureSignal);
 
     // Attach coverage data
@@ -514,7 +514,7 @@ export class TestRunCoordinator {
 
     // Resolve remaining results through multiple strategies
     await this.resolveDataDrivenResults(testLookup, result, run, projectRoot, buildTool, start);
-    await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start, hasBuildFailureSignal);
+    await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start, hasBuildFailureSignal, result.output);
     this.resolveFinalFallback(testLookup, result, run, start, hasBuildFailureSignal);
 
     // Attach coverage data
@@ -670,6 +670,7 @@ export class TestRunCoordinator {
     buildTool: BuildTool,
     start: number,
     hasBuildFailureSignal: boolean,
+    output: string,
   ): Promise<void> {
     if (hasBuildFailureSignal) {
       this.logger.appendLine('TestRunCoordinator: Build failure detected — ignoring XML reports for unresolved tests');
@@ -695,7 +696,13 @@ export class TestRunCoordinator {
             } else if (xmlResult.success) {
               run.passed(entry.test, Date.now() - start);
             } else {
-              run.failed(entry.test, this.resultProcessor.createTestMessage(xmlResult.errorMessage || 'Test failed', xmlResult.diff), Date.now() - start);
+              const xmlError = xmlResult.errorMessage?.trim();
+              const consoleFallback = extractErrorForTest(output, entry.data.className, entry.data.testName);
+              const fallbackError = consoleFallback !== 'Test failed'
+                ? consoleFallback
+                : `${entry.data.className}.${entry.data.testName} FAILED`;
+              const finalError = xmlError && xmlError !== 'Test failed' ? xmlError : fallbackError;
+              run.failed(entry.test, this.resultProcessor.createTestMessage(finalError, xmlResult.diff), Date.now() - start);
             }
           }
         }
@@ -724,16 +731,21 @@ export class TestRunCoordinator {
             const errorMessage = extractErrorForTest(result.output, entry.data.className!, entry.data.testName!);
             run.failed(entry.test, this.resultProcessor.createTestMessage(errorMessage), Date.now() - start);
           } else if (hasBuildFailureSignal) {
+            const buildFailureMessage = this.extractBuildFailureMessage(result.output);
             run.failed(
               entry.test,
-              this.resultProcessor.createTestMessage('Build failed before test execution. See build output for details.'),
+              this.resultProcessor.createTestMessage(buildFailureMessage),
               Date.now() - start,
             );
           } else {
-            // No failure detected for this specific test.
-            // Default to passed rather than skipped — if the batch ran and
-            // we have no evidence this test failed, it most likely passed.
-            run.passed(entry.test, Date.now() - start);
+            // Batch failed but we have no per-test failure and no build signal.
+            // Extract whatever we can from the output rather than silently passing.
+            const fallbackMsg = this.extractBuildFailureMessage(result.output);
+            if (fallbackMsg && !fallbackMsg.startsWith('Build failed')) {
+              run.failed(entry.test, this.resultProcessor.createTestMessage(fallbackMsg), Date.now() - start);
+            } else {
+              run.passed(entry.test, Date.now() - start);
+            }
           }
         }
       }
@@ -747,10 +759,92 @@ export class TestRunCoordinator {
 
     return (
       /\bBUILD FAILED\b/i.test(output)
+      || /\bBUILD FAILURE\b/i.test(output)
       || /Execution failed for task\s+['"]?:[^'"\s]+['"]?/i.test(output)
       || /\bCompilation failed; see the compiler error output for details\b/i.test(output)
+      || /\bCOMPILATION ERROR\b/i.test(output)
+      || /^\s*\[ERROR\]\s+Failed to execute goal\s+/im.test(output)
       || /^\s*>\s*Task\s+:[^\n\r]+\s+FAILED\s*$/im.test(output)
     );
+  }
+
+  private extractBuildFailureMessage(output: string): string {
+    if (!output) {
+      return 'Build failed (no details available in output).';
+    }
+
+    const rawLines = output.split('\n');
+    const collected: string[] = [];
+
+    // Noise = boilerplate lines that never carry useful diagnostic info.
+    // Everything else is kept.
+    const isNoiseLine = (line: string): boolean => {
+      const t = line.trim();
+      if (!t) { return true; }
+      // Generic Gradle hints
+      if (/^>?\s*Compilation failed; see the compiler error output for details\.?$/i.test(t)) { return true; }
+      if (/^\* Try:/i.test(t)) { return true; }
+      if (/^\* Get more help/i.test(t)) { return true; }
+      if (/^>\s*Run with\s+--/i.test(t)) { return true; }
+      if (/^Deprecated Gradle features/i.test(t)) { return true; }
+      if (/^BUILD (FAILED|SUCCESSFUL)\b/i.test(t)) { return true; }
+      if (/^FAILURE:\s+Build failed with an exception\.?\s*$/i.test(t)) { return true; }
+      if (/^>\s*Task\s+:[^\s]+\s+FAILED\s*$/i.test(t)) { return true; }
+      if (/^\d+ actionable task/i.test(t)) { return true; }
+      if (/^BUILD FAILED in\s+/i.test(t)) { return true; }
+      // Maven boilerplate
+      if (/^\[ERROR\]\s+BUILD FAILURE\s*$/i.test(t)) { return true; }
+      if (/^\[ERROR\]\s+COMPILATION ERROR\s*:?\s*$/i.test(t)) { return true; }
+      if (/^\[ERROR\]\s+Tests run:/i.test(t)) { return true; }
+      if (/^\[ERROR\]\s+There are test failures\.?$/i.test(t)) { return true; }
+      if (/^\[ERROR\]\s+Please refer to\s+/i.test(t)) { return true; }
+      if (/^\[ERROR\]\s+Re-run Maven using the\s+/i.test(t)) { return true; }
+      if (/^\[ERROR\]\s+Failed to execute goal\s+/i.test(t)) { return true; }
+      if (/^\[ERROR\]\s+->\s+\[Help /i.test(t)) { return true; }
+      if (/^\[ERROR\]\s+For more information/i.test(t)) { return true; }
+      // Standard log prefixes that are never diagnostics
+      if (/^\[INFO\]/i.test(t)) { return true; }
+      if (/^\[WARNING\]/i.test(t)) { return true; }
+      if (/^\[DEBUG\]/i.test(t)) { return true; }
+      // Test result summary lines
+      if (/^\S+\s+>\s+\S+.*\s+(PASSED|SKIPPED)\s*$/i.test(t)) { return true; }
+      return false;
+    };
+
+    for (const line of rawLines) {
+      if (!isNoiseLine(line)) {
+        collected.push(line.trim());
+      }
+    }
+
+    // Limit stack trace depth: keep at most 3 'at ...' lines per block
+    const trimmed = this.trimStackTraceDepth(collected, 3);
+
+    if (trimmed.length > 0) {
+      // Cap at ~25 lines to avoid overwhelming the UI
+      return trimmed.slice(0, 25).join('\n');
+    }
+
+    return 'Build failed (no details available in output).';
+  }
+
+  private trimStackTraceDepth(lines: string[], maxPerBlock: number): string[] {
+    const result: string[] = [];
+    let consecutiveAt = 0;
+    for (const line of lines) {
+      if (/^\s*at\s+/.test(line)) {
+        consecutiveAt++;
+        if (consecutiveAt <= maxPerBlock) {
+          result.push(line);
+        } else if (consecutiveAt === maxPerBlock + 1) {
+          result.push('  ...');
+        }
+      } else {
+        consecutiveAt = 0;
+        result.push(line);
+      }
+    }
+    return result;
   }
 
   private async attachCoverageData(rootProject: string, run: vscode.TestRun): Promise<void> {

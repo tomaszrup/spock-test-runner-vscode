@@ -1,6 +1,5 @@
 package com.example.submodule
 
-import com.example.submodule.StringHelper
 import spock.lang.Specification
 
 class StringHelperSpec extends Specification {

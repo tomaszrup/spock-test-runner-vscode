@@ -609,7 +609,7 @@ describe('TestRunCoordinator', () => {
       // Batch fails overall but no specific error for this test
       executionService.executeBatch.mockResolvedValue({
         success: false,
-        output: 'OtherSpec > other test FAILED\nBUILD FAILED',
+        output: '> Task :compileJava FAILED\n> Could not compile test classes.\nBUILD FAILED',
       });
       resultParser.parseClassTestResults.mockResolvedValue(new Map());
 
@@ -620,7 +620,7 @@ describe('TestRunCoordinator', () => {
       expect(passedSpy).not.toHaveBeenCalled();
       expect(failedSpy).toHaveBeenCalledWith(
         test1,
-        expect.objectContaining({ message: expect.stringContaining('Build failed before test execution') }),
+        expect.objectContaining({ message: expect.stringContaining('Could not compile test classes') }),
         expect.any(Number),
       );
       expect(skippedSpy).not.toHaveBeenCalled();
@@ -637,7 +637,7 @@ describe('TestRunCoordinator', () => {
 
       executionService.executeBatch.mockResolvedValue({
         success: false,
-        output: '> Task :compileJava FAILED\nBUILD FAILED',
+        output: '> Task :compileJava FAILED\nExecution failed for task :compileJava.\nBUILD FAILED',
       });
 
       // Simulate stale/previous XML that would otherwise mark this test as passed.
@@ -654,7 +654,177 @@ describe('TestRunCoordinator', () => {
       expect(passedSpy).not.toHaveBeenCalled();
       expect(failedSpy).toHaveBeenCalledWith(
         test1,
-        expect.objectContaining({ message: expect.stringContaining('Build failed before test execution') }),
+        expect.objectContaining({ message: expect.stringContaining('Execution failed for task :compileJava') }),
+        expect.any(Number),
+      );
+    });
+
+    it('should prioritize per-test assertion details over build failure fallback in mixed output', async () => {
+      const { hasErrorForTest, extractErrorForTest } = await import('./services/SpockErrorParser');
+      const hasErrorForTestMock = vi.mocked(hasErrorForTest);
+      const extractErrorForTestMock = vi.mocked(extractErrorForTest);
+
+      // Configure mocks: test1 has a per-test failure, test2 does not
+      hasErrorForTestMock.mockImplementation(
+        (_output: string, _className: string, testName: string) => testName === 'should add',
+      );
+      extractErrorForTestMock.mockImplementation(
+        (_output: string, _className: string, testName: string) =>
+          testName === 'should add' ? 'Condition not satisfied:\n  result == 5\n  |      |\n  4      false' : 'Test failed',
+      );
+
+      const run = createMockRun();
+      const failedSpy = run.failed;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should add', vscode.Uri.file('/workspace/project/spec.groovy'));
+      const test2 = controller.createTestItem('t2', 'should multiply', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'CalculatorSpec', testName: 'should add' });
+      treeManager.testData.set(test2, { type: 'test', className: 'CalculatorSpec', testName: 'should multiply' });
+
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: [
+          'CalculatorSpec > should add FAILED',
+          'Condition not satisfied:',
+          '  result == 5',
+          '  |      |',
+          '  4      false',
+          '> Task :compileJava FAILED',
+          '> Could not compile test classes.',
+          'BUILD FAILED',
+        ].join('\n'),
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1, test2]);
+      await coordinator.runHandler(false, request, token);
+
+      expect(failedSpy).toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: expect.stringContaining('Condition not satisfied') }),
+        expect.any(Number),
+      );
+      expect(failedSpy).toHaveBeenCalledWith(
+        test2,
+        expect.objectContaining({ message: expect.stringContaining('Could not compile test classes') }),
+        expect.any(Number),
+      );
+
+      // Restore default mock behavior
+      hasErrorForTestMock.mockImplementation(() => false);
+      extractErrorForTestMock.mockImplementation(() => 'Test failed');
+    });
+
+    it('should use build failure stack trace/cause block instead of generic fallback', async () => {
+      const run = createMockRun();
+      const failedSpy = run.failed;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'passing test', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'Spec', testName: 'passing test' });
+
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: [
+          '> Task :compileJava FAILED',
+          'BUILD FAILED',
+          '* What went wrong:',
+          'Execution failed for task :compileJava.',
+          'Caused by: java.lang.RuntimeException: Failed to load config',
+          '    at com.example.Build.configure(Build.groovy:12)',
+          '* Try:',
+        ].join('\n'),
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      expect(failedSpy).toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: expect.stringContaining('Execution failed for task :compileJava.') }),
+        expect.any(Number),
+      );
+      expect(failedSpy).toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: expect.stringContaining('Caused by: java.lang.RuntimeException: Failed to load config') }),
+        expect.any(Number),
+      );
+      expect(failedSpy).not.toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: 'Build failed before test execution.' }),
+        expect.any(Number),
+      );
+    });
+
+    it('should skip generic compiler-output hint and show concrete compiler error', async () => {
+      const run = createMockRun();
+      const failedSpy = run.failed;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'passing test', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'Spec', testName: 'passing test' });
+
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: [
+          '> Task :compileTestGroovy FAILED',
+          '> Compilation failed; see the compiler error output for details.',
+          'C:\\work\\src\\test\\groovy\\Spec.groovy: 12: unable to resolve class MissingType',
+          'BUILD FAILED',
+        ].join('\n'),
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      expect(failedSpy).toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: expect.stringContaining('unable to resolve class MissingType') }),
+        expect.any(Number),
+      );
+      expect(failedSpy).not.toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: expect.stringContaining('Compilation failed; see the compiler error output for details') }),
+        expect.any(Number),
+      );
+    });
+
+    it('should not show plain Test failed when XML failure lacks error message', async () => {
+      const run = createMockRun();
+      const failedSpy = run.failed;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should add', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'CalculatorSpec', testName: 'should add' });
+
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: 'CalculatorSpec > should add FAILED',
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(
+        new Map([
+          ['should add', { success: false, skipped: false, duration: 0, errorMessage: '' }],
+        ]),
+      );
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      expect(failedSpy).toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: expect.stringContaining('CalculatorSpec.should add FAILED') }),
+        expect.any(Number),
+      );
+      expect(failedSpy).not.toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: 'Test failed' }),
         expect.any(Number),
       );
     });

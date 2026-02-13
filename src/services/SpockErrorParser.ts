@@ -137,24 +137,52 @@ export function extractErrorForTest(output: string, className: string, testName:
   }
 
   const lines = output.split('\n');
+  const simpleClassName = className.includes('.') ? className.substring(className.lastIndexOf('.') + 1) : className;
+
+  const isFailureLineForTarget = (line: string): boolean => {
+    if (!line.includes(testName)) {
+      return false;
+    }
+
+    const hasClass = line.includes(className) || line.includes(simpleClassName);
+    if (!hasClass) {
+      return false;
+    }
+
+    return /(FAILED|FAILURE|\[ERROR\]|<<<\s+FAILURE|<<<\s+ERROR)/i.test(line);
+  };
+
+  const isFailureBoundary = (line: string): boolean => {
+    const gradleResultBoundary = /^\s*\S+\s+>\s+.+?\s+(PASSED|FAILED|SKIPPED)\s*$/i.test(line);
+    const mavenBoundary = /^\s*\[ERROR\]\s+.+\s+<<<\s+(FAILURE|ERROR)!\s*$/i.test(line);
+    return gradleResultBoundary || mavenBoundary;
+  };
+
+  const failureIndex = lines.findIndex(isFailureLineForTarget);
+  if (failureIndex === -1) {
+    return 'Test failed';
+  }
+
+  const fallbackFailureLine = lines[failureIndex].trim();
   const parts: string[] = [];
   let conditionBlock: string[] = [];
   let capturingCondition = false;
   const stackTraceLines: string[] = [];
-  let foundRelevantFailure = false;
+  let causeLine: string | undefined;
 
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = failureIndex + 1; i < lines.length; i++) {
     const line = lines[i];
+    const trimmed = line.trim();
 
-    // Detect the FAILED line for our specific test
-    if (line.includes('FAILED') && (line.includes(className) || line.includes(testName))) {
-      foundRelevantFailure = true;
+    // Stop at the next test result boundary to keep extraction scoped
+    if (isFailureBoundary(line) && i !== failureIndex + 1) {
+      break;
     }
 
     // Capture Spock "Condition not satisfied" / "Assertion failed" blocks
-    if (line.includes('Condition not satisfied:') || line.includes('Assertion failed:')) {
+    if (trimmed.includes('Condition not satisfied:') || trimmed.includes('Assertion failed:')) {
       capturingCondition = true;
-      conditionBlock = [line.trim()];
+      conditionBlock = [trimmed];
       continue;
     }
     if (capturingCondition) {
@@ -167,14 +195,27 @@ export function extractErrorForTest(output: string, className: string, testName:
     }
 
     // Capture stack trace lines from test code (not Gradle internals)
-    if (line.trim().startsWith('at ') && line.includes('.groovy:')) {
-      stackTraceLines.push(line.trim());
+    if (trimmed.startsWith('at ') && line.includes('.groovy:')) {
+      stackTraceLines.push(trimmed);
+    }
+
+    if (!causeLine && trimmed.length > 0) {
+      const looksLikeCause =
+        /(AssertionError|ComparisonFailure|Condition not satisfied|Assertion failed|Exception|Error:|expected:\s*<|Actual|Expected)/i.test(trimmed)
+        && !/^\s*>\s*Task\s+/i.test(trimmed)
+        && !/^\s*\[INFO\]/i.test(trimmed)
+        && !/^\s*\[DEBUG\]/i.test(trimmed);
+      if (looksLikeCause) {
+        causeLine = trimmed;
+      }
     }
   }
 
   // Build the error message
   if (conditionBlock.length > 0) {
     parts.push(conditionBlock.join('\n'));
+  } else if (causeLine) {
+    parts.push(causeLine);
   }
   if (stackTraceLines.length > 0) {
     if (parts.length > 0) { parts.push(''); }
@@ -185,12 +226,7 @@ export function extractErrorForTest(output: string, className: string, testName:
     return parts.join('\n');
   }
 
-  // If we found a FAILED line but couldn't extract details, report that
-  if (foundRelevantFailure) {
-    return `${className}.${testName} FAILED (see console output for details)`;
-  }
-
-  return 'Test failed';
+  return fallbackFailureLine || 'Test failed';
 }
 
 /**

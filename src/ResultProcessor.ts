@@ -62,7 +62,7 @@ export class ResultProcessor {
         if (result.success) {
           run.passed(test, duration);
         } else {
-          const errorMessage = extractErrorForTest(result.output || '', data.className!, data.testName!);
+          const errorMessage = this.resolveFallbackErrorMessage(result.output || '', data.className!, data.testName!);
           const message = this.createTestMessage(errorMessage);
           run.failed(test, message, duration);
         }
@@ -73,11 +73,69 @@ export class ResultProcessor {
       if (result.success) {
         run.passed(test, duration);
       } else {
-        const errorMessage = extractErrorForTest(result.output || '', data.className!, data.testName!);
+        const errorMessage = this.resolveFallbackErrorMessage(result.output || '', data.className!, data.testName!);
         const message = this.createTestMessage(errorMessage);
         run.failed(test, message, duration);
       }
     }
+  }
+
+  private resolveFallbackErrorMessage(output: string, className: string, testName: string): string {
+    const parsed = extractErrorForTest(output || '', className, testName);
+    if (parsed && parsed !== 'Test failed') {
+      return parsed;
+    }
+
+    if (!output) {
+      return `${className}.${testName} FAILED`;
+    }
+
+    const lines = output.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+    const simpleClassName = className.includes('.') ? className.substring(className.lastIndexOf('.') + 1) : className;
+
+    const isNoise = (line: string): boolean => (
+      /^\[INFO\]/i.test(line)
+      || /^\[DEBUG\]/i.test(line)
+      || /^\[WARNING\]/i.test(line)
+      || /^BUILD (FAILED|SUCCESSFUL)\b/i.test(line)
+      || /^\* Try:/i.test(line)
+      || /^\* Get more help/i.test(line)
+      || /^>\s*Run with\s+--/i.test(line)
+      || /^\d+ actionable task/i.test(line)
+      || /^>\s*Task\s+:[^\s]+\s+FAILED\s*$/i.test(line)
+      || /^>?\s*Compilation failed; see the compiler error output for details\.?$/i.test(line)
+      || /^\[ERROR\]\s+BUILD FAILURE\s*$/i.test(line)
+      || /^\[ERROR\]\s+COMPILATION ERROR\s*:?\s*$/i.test(line)
+      || /^\[ERROR\]\s+Failed to execute goal\s+/i.test(line)
+    );
+
+    const scopedFailureLine = lines.find((line) =>
+      line.includes(testName)
+      && (line.includes(className) || line.includes(simpleClassName))
+      && /(FAILED|FAILURE|\[ERROR\]|<<<\s+FAILURE|<<<\s+ERROR)/i.test(line),
+    );
+    if (scopedFailureLine) {
+      return scopedFailureLine;
+    }
+
+    const focused = lines.filter((line) =>
+      !isNoise(line)
+      && (
+        /Condition not satisfied:|Assertion failed:|Caused by:|Exception|Error:|unable to resolve class|could not resolve/i.test(line)
+        || /^\s*at\s+/.test(line)
+        || /\.(java|groovy|kt):\s*\d+/i.test(line)
+      ),
+    );
+    if (focused.length > 0) {
+      return focused.slice(0, 12).join('\n');
+    }
+
+    const nonNoise = lines.filter((line) => !isNoise(line));
+    if (nonNoise.length > 0) {
+      return nonNoise.slice(0, 12).join('\n');
+    }
+
+    return `${className}.${testName} FAILED`;
   }
 
   // ── Iteration item creation ────────────────────────────────────────
