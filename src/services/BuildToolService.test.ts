@@ -236,7 +236,6 @@ describe('BuildToolService', () => {
       expect(args).toContain('test');
       expect(args).toContain('--tests');
       expect(args.some(a => a.includes('MySpec'))).toBe(true);
-      expect(args).toContain('--stacktrace');
     });
 
     it('should include --debug-jvm when debug is true', async () => {
@@ -971,7 +970,7 @@ describe('BuildToolService', () => {
   // ── splitGradleTestFilters ──────────────────────────────────────────
 
   describe('splitGradleTestFilters', () => {
-    const baseArgs = ['gradlew.bat', 'test', '--stacktrace', '--init-script', '"path/to/init.gradle"'];
+    const baseArgs = ['gradlew.bat', 'test', '--init-script', '"path/to/init.gradle"'];
 
     it('should return single batch when everything fits', () => {
       const filters = ['ClassA.test1', 'ClassB.test2'];

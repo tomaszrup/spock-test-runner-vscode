@@ -607,7 +607,7 @@ export class BuildToolService {
       gradleCommand = 'gradle';
     }
     const taskName = subprojectPrefix ? `${subprojectPrefix}:test` : 'test';
-    const baseArgs = [gradleCommand, taskName, '--tests', escapedTestName, '--stacktrace'];
+    const baseArgs = [gradleCommand, taskName, '--tests', escapedTestName];
     
     const initScriptPath = shellEscape(await this.getInitScriptPath());
     const initScriptArgs = ['--init-script', initScriptPath];
@@ -651,8 +651,6 @@ export class BuildToolService {
     for (const filter of coalesced) {
       args.push('--tests', shellEscape(sanitizeTestFilter(filter, logger)));
     }
-
-    args.push('--stacktrace');
 
     const initScriptPath = coverage
       ? shellEscape(await this.getCoverageInitScriptPath())
@@ -952,7 +950,7 @@ export class BuildToolService {
    *
    * @param testFilters  Full list of Gradle test filters.
    * @param baseArgs     The command args *without* `--tests` entries
-   *                     (e.g. `['gradlew.bat', 'test', '--stacktrace', ...]`).
+  *                     (e.g. `['gradlew.bat', 'test', '--init-script', ...]`).
    * @param maxLen       Maximum allowed command-line length.
    * @returns Array of filter sub-arrays.  If everything fits, returns a
    *          single-element array containing the original filters.

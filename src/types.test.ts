@@ -49,11 +49,13 @@ describe('types', () => {
       const data: TestData = {
         type: 'test',
         className: 'MySpec',
+        classFqn: 'com.example.MySpec',
         testName: 'my test',
         isDataDriven: true,
         iterationResults: [],
       };
       expect(data.isDataDriven).toBe(true);
+      expect(data.classFqn).toBe('com.example.MySpec');
     });
 
     it('should accept a file-level test data', () => {

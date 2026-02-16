@@ -5,6 +5,10 @@ allprojects {
     // Enable real-time test result output for the extension to parse
     testLogging {
       events "passed", "failed", "skipped"
+      exceptionFormat "full"
+      showExceptions true
+      showCauses true
+      showStackTraces true
     }
   }
 }

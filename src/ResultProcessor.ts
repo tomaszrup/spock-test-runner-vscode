@@ -98,6 +98,7 @@ export class ResultProcessor {
       || /^\[DEBUG\]/i.test(line)
       || /^\[WARNING\]/i.test(line)
       || /^BUILD (FAILED|SUCCESSFUL)\b/i.test(line)
+      || /^>\s*Task\s+:[^\s]+\s+(UP-TO-DATE|NO-SOURCE|FROM-CACHE|SKIPPED|SUCCESS|EXECUTED)\s*$/i.test(line)
       || /^\* Try:/i.test(line)
       || /^\* Get more help/i.test(line)
       || /^>\s*Run with\s+--/i.test(line)

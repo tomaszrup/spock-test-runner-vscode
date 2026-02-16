@@ -436,6 +436,7 @@ export class TestTreeManager {
     let hasRunnableClasses = false;
     let hasAnyClasses = false;
 
+    const packageName = this.inferPackageNameFromFile(file.uri.fsPath);
     for (const testClass of testClasses) {
       this.logger.appendLine(`TestTreeManager: Found test class: ${testClass.name}`);
       this.logger.debug(`Class ${testClass.name} - isAbstract: ${testClass.isAbstract}, annotations: ${JSON.stringify(testClass.annotations?.map(a => a.name))}`);
@@ -479,7 +480,8 @@ export class TestTreeManager {
       }
 
       this.logger.debug(`Class ${testClass.name} - label: "${classLabel}", ignored: ${classIgnored}`);
-      this.testData.set(classItem, { type: 'class', className: testClass.name });
+      const classFqn = packageName ? `${packageName}.${testClass.name}` : testClass.name;
+      this.testData.set(classItem, { type: 'class', className: testClass.name, classFqn });
       file.children.add(classItem);
 
       for (const testMethod of testClass.methods) {
@@ -525,6 +527,7 @@ export class TestTreeManager {
           this.testData.set(parentTestItem, {
             type: 'test',
             className: testClass.name,
+            classFqn,
             testName: testMethod.name,
             isDataDriven: true,
           });
@@ -552,6 +555,7 @@ export class TestTreeManager {
             type: 'test',
             className: testClass.name,
             testName: testMethod.name,
+            classFqn,
           });
           classItem.children.add(testItem);
         }
@@ -623,6 +627,15 @@ export class TestTreeManager {
     this.logger.appendLine(`TestTreeManager: Parsed ${testCount} tests in file: ${file.uri.fsPath}`);
   }
 
+  private inferPackageNameFromFile(filePath: string): string {
+    const normalized = filePath.replace(/\\/g, '/');
+    const sourceRootPattern = /\/src\/[^/]+\/(?:groovy|java|kotlin|scala)\/(.+)\//;
+    const match = normalized.match(sourceRootPattern);
+    if (!match || !match[1]) {
+      return '';
+    }
+    return match[1].replace(/\//g, '.');
+  }
   // ── Iteration item cleanup ─────────────────────────────────────────
 
   cleanupIterationItems(fileUri: string): void {

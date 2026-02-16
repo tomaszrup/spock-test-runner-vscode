@@ -134,9 +134,8 @@ export class TestResultParser {
         return results;
       }
 
-      // Find the XML file for this class (could be FQN like TEST-com.example.ClassName.xml)
       const files = await fsp.readdir(testResultsDir);
-      const matchingFile = files.find(f => f.endsWith(`${className}.xml`));
+      const matchingFile = this.findBestMatchingReportFile(files, className);
       if (!matchingFile) {
         this.logger.appendLine(`TestResultParser: No XML report found for class ${className}`);
         return results;
@@ -248,9 +247,8 @@ export class TestResultParser {
         return new Map();
       }
 
-      // Find the XML file for this class (could be FQN like TEST-com.example.ClassName.xml)
       const files = await fsp.readdir(testResultsDir);
-      const matchingFile = files.find(f => f.endsWith(`${className}.xml`));
+      const matchingFile = this.findBestMatchingReportFile(files, className);
       if (!matchingFile) {
         this.logger.appendLine(`TestResultParser: No XML report found for class ${className}`);
         return new Map();
@@ -823,7 +821,7 @@ export class TestResultParser {
     }
 
     const files = await fsp.readdir(testResultsDir);
-    const matchingFile = files.find(f => f.endsWith(`${className}.xml`));
+    const matchingFile = this.findBestMatchingReportFile(files, className);
     if (!matchingFile) { return []; }
 
     const xmlPath = path.join(testResultsDir, matchingFile);
@@ -871,6 +869,38 @@ export class TestResultParser {
     }
 
     return results;
+  }
+
+  private findBestMatchingReportFile(files: string[], className: string): string | undefined {
+    const exactNames = new Set([
+      `${className}.xml`,
+      `TEST-${className}.xml`,
+    ]);
+
+    for (const file of files) {
+      if (exactNames.has(file)) {
+        return file;
+      }
+    }
+
+    const fqnSuffix = `.${className}.xml`;
+    const fqnMatch = files.find(f => f.endsWith(fqnSuffix));
+    if (fqnMatch) {
+      return fqnMatch;
+    }
+
+    const simpleName = className.includes('.') ? className.substring(className.lastIndexOf('.') + 1) : className;
+    const simpleExact = new Set([
+      `${simpleName}.xml`,
+      `TEST-${simpleName}.xml`,
+    ]);
+    for (const file of files) {
+      if (simpleExact.has(file)) {
+        return file;
+      }
+    }
+
+    return files.find(f => f.endsWith(`${simpleName}.xml`));
   }
 
   /**

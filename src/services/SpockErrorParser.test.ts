@@ -111,6 +111,37 @@ describe('SpockErrorParser', () => {
       expect(result).toContain('MySpec.groovy:10');
     });
 
+    it('should capture test-specific STANDARD_ERROR block with stack trace', () => {
+      const output = [
+        'MySpec > should add FAILED',
+        'MySpec > should add STANDARD_ERROR',
+        '    org.opentest4j.AssertionFailedError: expected: <5> but was: <4>',
+        '        at com.example.MySpec.should add(MySpec.groovy:22)',
+        '        at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)',
+        '',
+        'MySpec > should subtract PASSED',
+      ].join('\n');
+
+      const result = extractErrorForTest(output, 'com.example.MySpec', 'should add');
+      expect(result).toContain('AssertionFailedError');
+      expect(result).toContain('MySpec.groovy:22');
+      expect(result).not.toContain('should subtract PASSED');
+    });
+
+    it('should include causes and filter gradle internal stack frames', () => {
+      const output = [
+        'CalculatorSpec > should divide FAILED',
+        'Caused by: java.lang.ArithmeticException: / by zero',
+        '    at com.example.Calculator.divide(Calculator.java:15)',
+        '    at worker.org.gradle.process.internal.worker.GradleWorkerMain.run(GradleWorkerMain.java:69)',
+      ].join('\n');
+
+      const result = extractErrorForTest(output, 'CalculatorSpec', 'should divide');
+      expect(result).toContain('Caused by: java.lang.ArithmeticException: / by zero');
+      expect(result).toContain('Calculator.java:15');
+      expect(result).not.toContain('worker.org.gradle');
+    });
+
     it('should return concrete FAILED line when no detailed block is found', () => {
       const output = 'MySpec > test FAILED\nBUILD FAILED';
       const result = extractErrorForTest(output, 'MySpec', 'test');
@@ -191,6 +222,11 @@ describe('SpockErrorParser', () => {
     it('should detect Maven-style [ERROR] lines for a test', () => {
       const output = '[ERROR] MySpec > test one FAILURE';
       expect(hasErrorForTest(output, 'MySpec', 'test one')).toBe(true);
+    });
+
+    it('should ignore generic [ERROR] log lines without FAILED/FAILURE', () => {
+      const output = '[ERROR] com.example.MySpec - Application context startup warning for should add';
+      expect(hasErrorForTest(output, 'com.example.MySpec', 'should add')).toBe(false);
     });
   });
 });

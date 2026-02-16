@@ -138,6 +138,7 @@ export function extractErrorForTest(output: string, className: string, testName:
 
   const lines = output.split('\n');
   const simpleClassName = className.includes('.') ? className.substring(className.lastIndexOf('.') + 1) : className;
+  const testHeaderRegex = new RegExp(`^\\s*${escapeRegExp(simpleClassName)}\\s+>\\s+${escapeRegExp(testName)}\\s+(STANDARD_ERROR|STANDARD_OUT)\\s*$`, 'i');
 
   const isFailureLineForTarget = (line: string): boolean => {
     if (!line.includes(testName)) {
@@ -168,6 +169,9 @@ export function extractErrorForTest(output: string, className: string, testName:
   let conditionBlock: string[] = [];
   let capturingCondition = false;
   const stackTraceLines: string[] = [];
+  const standardOutputBlock: string[] = [];
+  let capturingStandardOutput = false;
+  let seenStandardOutputContent = false;
   let causeLine: string | undefined;
 
   for (let i = failureIndex + 1; i < lines.length; i++) {
@@ -177,6 +181,30 @@ export function extractErrorForTest(output: string, className: string, testName:
     // Stop at the next test result boundary to keep extraction scoped
     if (isFailureBoundary(line) && i !== failureIndex + 1) {
       break;
+    }
+
+    if (testHeaderRegex.test(trimmed)) {
+      capturingStandardOutput = true;
+      seenStandardOutputContent = false;
+      continue;
+    }
+
+    if (capturingStandardOutput) {
+      if (trimmed.length === 0) {
+        if (seenStandardOutputContent) {
+          capturingStandardOutput = false;
+        }
+        continue;
+      }
+      if (/^\S+\s+>\s+.+\s+(FAILED|PASSED|SKIPPED)\s*$/i.test(trimmed)) {
+        capturingStandardOutput = false;
+      } else if (/^\S+\s+>\s+.+\s+STANDARD_(ERROR|OUT)\s*$/i.test(trimmed)) {
+        capturingStandardOutput = false;
+      } else {
+        standardOutputBlock.push(trimmed);
+        seenStandardOutputContent = true;
+        continue;
+      }
     }
 
     // Capture Spock "Condition not satisfied" / "Assertion failed" blocks
@@ -194,9 +222,17 @@ export function extractErrorForTest(output: string, className: string, testName:
       }
     }
 
-    // Capture stack trace lines from test code (not Gradle internals)
-    if (trimmed.startsWith('at ') && line.includes('.groovy:')) {
+    // Capture stack trace lines and chain causes (test-scoped only)
+    if (trimmed.startsWith('at ') || /^\.\.\.\s+\d+\s+more$/.test(trimmed)) {
+      if (!isGradleInternalStackLine(trimmed)) {
+        stackTraceLines.push(trimmed);
+      }
+      continue;
+    }
+
+    if (/^Caused by:\s+/i.test(trimmed)) {
       stackTraceLines.push(trimmed);
+      continue;
     }
 
     if (!causeLine && trimmed.length > 0) {
@@ -217,6 +253,15 @@ export function extractErrorForTest(output: string, className: string, testName:
   } else if (causeLine) {
     parts.push(causeLine);
   }
+
+  if (standardOutputBlock.length > 0) {
+    const stdBlock = standardOutputBlock.join('\n').trim();
+    if (stdBlock.length > 0) {
+      if (parts.length > 0) { parts.push(''); }
+      parts.push(stdBlock);
+    }
+  }
+
   if (stackTraceLines.length > 0) {
     if (parts.length > 0) { parts.push(''); }
     parts.push(stackTraceLines.join('\n'));
@@ -227,6 +272,14 @@ export function extractErrorForTest(output: string, className: string, testName:
   }
 
   return fallbackFailureLine || 'Test failed';
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isGradleInternalStackLine(line: string): boolean {
+  return /\borg\.gradle\.|\bworker\.org\.gradle\./.test(line);
 }
 
 /**
@@ -260,7 +313,7 @@ export function hasErrorForTest(output: string, className: string, testName: str
     // The line must reference the specific test name AND contain a failure keyword.
     // We match the test name AND either the class name or a failure keyword pattern
     // to avoid false positives from generic error text.
-    if (line.includes(testName) && (line.includes('FAILED') || line.includes('FAILURE') || line.includes('[ERROR]'))) {
+    if (line.includes(testName) && (line.includes('FAILED') || line.includes('FAILURE'))) {
       // Extra check: the class name should also appear on the same line
       // (either FQN or simple name) to avoid cross-class false positives.
       const simpleName = className.includes('.') ? className.substring(className.lastIndexOf('.') + 1) : className;

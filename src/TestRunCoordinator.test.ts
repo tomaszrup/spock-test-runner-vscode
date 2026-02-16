@@ -471,7 +471,6 @@ describe('TestRunCoordinator', () => {
         for (const f of filters) {
           args.push('--tests', `"${f}"`);
         }
-        args.push('--stacktrace');
         return args;
       });
 
@@ -578,6 +577,38 @@ describe('TestRunCoordinator', () => {
   // ── Fallback result reporting ────────────────────────────────────
 
   describe('resolveFinalFallback', () => {
+    it('should resolve XML results using classFqn when available', async () => {
+      const run = createMockRun();
+      const passedSpy = run.passed;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should add', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, {
+        type: 'test',
+        className: 'CalculatorSpec',
+        classFqn: 'com.example.CalculatorSpec',
+        testName: 'should add',
+      });
+
+      executionService.executeBatch.mockResolvedValue({ success: true, output: '' });
+      resultParser.parseClassTestResults.mockResolvedValue(
+        new Map([
+          ['should add', { success: true, skipped: false, duration: 0.01 }],
+        ]),
+      );
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      expect(resultParser.parseClassTestResults).toHaveBeenCalledWith(
+        '/workspace/project',
+        'com.example.CalculatorSpec',
+        'gradle',
+      );
+      expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
+    });
+
     it('should report unresolved tests as passed when batch succeeds', async () => {
       const run = createMockRun();
       const passedSpy = run.passed; // save ref before createTrackingRun replaces it
@@ -656,6 +687,41 @@ describe('TestRunCoordinator', () => {
       expect(erroredSpy).toHaveBeenCalledWith(
         test1,
         expect.objectContaining({ message: expect.stringContaining('Execution failed for task :compileJava') }),
+        expect.any(Number),
+      );
+    });
+
+    it('should mark unresolved data-driven tests as errored on build failure and skip data-driven parser', async () => {
+      const run = createMockRun();
+      const erroredSpy = run.errored;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'maximum of #a and #b is #c', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, {
+        type: 'test',
+        className: 'DataDrivenSpec',
+        testName: 'maximum of #a and #b is #c',
+        isDataDriven: true,
+      });
+
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: [
+          '> Task :compileTestGroovy FAILED',
+          'startup failed:',
+          'Spec.groovy: 12: unable to resolve class Specification',
+          'BUILD FAILED',
+        ].join('\n'),
+      });
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      expect(resultProcessor.handleDataDrivenTestResults).not.toHaveBeenCalled();
+      expect(erroredSpy).toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: expect.stringContaining('unable to resolve class Specification') }),
         expect.any(Number),
       );
     });

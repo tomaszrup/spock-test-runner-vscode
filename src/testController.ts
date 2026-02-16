@@ -206,7 +206,8 @@ export class SpockTestController {
         items.forEach(item => {
           const data = this.treeManager.testData.get(item);
           if (data?.className && data?.testName) {
-            if (this.runCoordinator.lastFailedTests.has(`${data.className}#${data.testName}`)) {
+            const classId = data.classFqn || data.className;
+            if (this.runCoordinator.lastFailedTests.has(`${classId}#${data.testName}`)) {
               failedItems.push(item);
             }
           }

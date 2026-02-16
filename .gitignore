@@ -11,3 +11,4 @@ sample-project/bin/
 coverage/
 **/target/
 **/build/
+.gradle

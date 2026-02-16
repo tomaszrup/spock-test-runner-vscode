@@ -122,8 +122,9 @@ export class TestRunCoordinator {
 
     const semanticKey = (test: vscode.TestItem): string | undefined => {
       const data = self.treeManager.testData.get(test);
-      if (data?.className && data?.testName) {
-        return `${data.className}#${data.testName}`;
+      const classId = data?.classFqn || data?.className;
+      if (classId && data?.testName) {
+        return `${classId}#${data.testName}`;
       }
       return undefined;
     };
@@ -170,7 +171,8 @@ export class TestRunCoordinator {
     const matchesFailedKey = (item: vscode.TestItem): boolean => {
       const data = this.treeManager.testData.get(item);
       if (data?.className && data?.testName) {
-        return this.lastFailedTests.has(`${data.className}#${data.testName}`);
+        const classId = data.classFqn || data.className;
+        return this.lastFailedTests.has(`${classId}#${data.testName}`);
       }
       return false;
     };
@@ -493,7 +495,16 @@ export class TestRunCoordinator {
     }
 
     // Resolve remaining results through multiple strategies
-    await this.resolveDataDrivenResults(testLookup, combinedResult, run, projectRoot, buildTool, start);
+    await this.resolveDataDrivenResults(
+      testLookup,
+      combinedResult,
+      run,
+      projectRoot,
+      buildTool,
+      start,
+      hasBuildFailureSignal,
+      combinedResult.output,
+    );
     await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start, hasBuildFailureSignal, combinedResult.output);
     this.resolveFinalFallback(testLookup, combinedResult, run, start, hasBuildFailureSignal);
 
@@ -559,7 +570,16 @@ export class TestRunCoordinator {
     }
 
     // Resolve remaining results through multiple strategies
-    await this.resolveDataDrivenResults(testLookup, result, run, projectRoot, buildTool, start);
+    await this.resolveDataDrivenResults(
+      testLookup,
+      result,
+      run,
+      projectRoot,
+      buildTool,
+      start,
+      hasBuildFailureSignal,
+      result.output,
+    );
     await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start, hasBuildFailureSignal, result.output);
     this.resolveFinalFallback(testLookup, result, run, start, hasBuildFailureSignal);
 
@@ -603,12 +623,13 @@ export class TestRunCoordinator {
     const testLookup = new Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>();
 
     for (const item of tests) {
-      if (item.data.className && item.data.testName) {
-        testFilters.push(`${item.data.className}.${item.data.testName}`);
-        const key = `${item.data.className}#${item.data.testName}`;
+      const classId = item.data.classFqn || item.data.className;
+      if (classId && item.data.testName) {
+        testFilters.push(`${classId}.${item.data.testName}`);
+        const key = `${classId}#${item.data.testName}`;
         testLookup.set(key, {...item, resolved: false});
       } else {
-        this.logger.appendLine(`TestRunCoordinator: Skipping test with missing className=${item.data.className} testName=${item.data.testName}`);
+        this.logger.appendLine(`TestRunCoordinator: Skipping test with missing className=${item.data.className} classFqn=${item.data.classFqn} testName=${item.data.testName}`);
       }
     }
 
@@ -696,7 +717,25 @@ export class TestRunCoordinator {
     projectRoot: string,
     buildTool: BuildTool,
     start: number,
+    hasBuildFailureSignal: boolean,
+    output: string,
   ): Promise<void> {
+    if (hasBuildFailureSignal) {
+      const buildFailureMessage = this.extractBuildFailureMessage(output);
+      this.logger.appendLine('TestRunCoordinator: Build failure detected — skipping data-driven parsing and marking unresolved data-driven tests as errored');
+      for (const [, entry] of testLookup) {
+        if (entry.data.isDataDriven && !entry.resolved) {
+          run.errored(
+            entry.test,
+            this.resultProcessor.createTestMessage(buildFailureMessage),
+            Date.now() - start,
+          );
+          entry.resolved = true;
+        }
+      }
+      return;
+    }
+
     for (const [, entry] of testLookup) {
       if (entry.data.isDataDriven && !entry.resolved) {
         try {
@@ -726,14 +765,15 @@ export class TestRunCoordinator {
     const unresolvedClasses = new Set<string>();
     for (const [, entry] of testLookup) {
       if (!entry.resolved && entry.data.className) {
-        unresolvedClasses.add(entry.data.className);
+        unresolvedClasses.add(entry.data.classFqn || entry.data.className);
       }
     }
 
     for (const className of unresolvedClasses) {
       const xmlResults = await this.testResultParser.parseClassTestResults(projectRoot, className, buildTool);
       for (const [, entry] of testLookup) {
-        if (!entry.resolved && entry.data.className === className && entry.data.testName) {
+        const entryClass = entry.data.classFqn || entry.data.className;
+        if (!entry.resolved && entryClass === className && entry.data.testName) {
           const xmlResult = xmlResults.get(entry.data.testName);
           if (xmlResult) {
             entry.resolved = true;
@@ -743,10 +783,10 @@ export class TestRunCoordinator {
               run.passed(entry.test, Date.now() - start);
             } else {
               const xmlError = xmlResult.errorMessage?.trim();
-              const consoleFallback = extractErrorForTest(output, entry.data.className, entry.data.testName);
+              const consoleFallback = extractErrorForTest(output, entryClass, entry.data.testName);
               const fallbackError = consoleFallback !== 'Test failed'
                 ? consoleFallback
-                : `${entry.data.className}.${entry.data.testName} FAILED`;
+                : `${entryClass}.${entry.data.testName} FAILED`;
               const finalError = xmlError && xmlError !== 'Test failed' ? xmlError : fallbackError;
               run.failed(entry.test, this.resultProcessor.createTestMessage(finalError, xmlResult.diff), Date.now() - start);
             }
@@ -772,9 +812,10 @@ export class TestRunCoordinator {
           // Batch failed — check if THIS SPECIFIC test failed, not just the class.
           // hasErrorForClass is too broad: it returns true for all tests in a class
           // even if only one test failed. We need per-test granularity.
-          const testError = hasErrorForTest(result.output, entry.data.className!, entry.data.testName!);
+          const classId = entry.data.classFqn || entry.data.className!;
+          const testError = hasErrorForTest(result.output, classId, entry.data.testName!);
           if (testError) {
-            const errorMessage = extractErrorForTest(result.output, entry.data.className!, entry.data.testName!);
+            const errorMessage = extractErrorForTest(result.output, classId, entry.data.testName!);
             run.failed(entry.test, this.resultProcessor.createTestMessage(errorMessage), Date.now() - start);
           } else if (hasBuildFailureSignal) {
             const buildFailureMessage = this.extractBuildFailureMessage(result.output);
@@ -826,6 +867,8 @@ export class TestRunCoordinator {
     const isNoiseLine = (line: string): boolean => {
       const t = line.trim();
       if (!t) { return true; }
+      // Gradle per-task status lines that are not diagnostics
+      if (/^>\s*Task\s+:[^\s]+\s+(UP-TO-DATE|NO-SOURCE|FROM-CACHE|SKIPPED|SUCCESS|EXECUTED)\s*$/i.test(t)) { return true; }
       // Generic Gradle hints
       if (/^>?\s*Compilation failed; see the compiler error output for details\.?$/i.test(t)) { return true; }
       if (/^\* Try:/i.test(t)) { return true; }
