@@ -58,25 +58,75 @@ export class TestExecutionService {
         cwd: options.workspacePath,
         stdio: 'pipe',
         env: { ...process.env },
-        shell: process.platform === 'win32'
+        shell: process.platform === 'win32',
+        detached: process.platform !== 'win32',
       });
+
+      const killProcessTree = (force: boolean): void => {
+        if (childProcess.killed) {
+          return;
+        }
+
+        if (process.platform === 'win32') {
+          if (childProcess.pid) {
+            try {
+              const taskkillArgs = ['/PID', String(childProcess.pid), '/T'];
+              if (force) {
+                taskkillArgs.push('/F');
+              }
+              spawn('taskkill', taskkillArgs, {
+                stdio: 'ignore',
+                shell: true,
+                windowsHide: true,
+              }).on('error', (error: Error) => {
+                this.logger.appendLine(`TestExecutionService: taskkill failed: ${error.message}`);
+              });
+            } catch (error) {
+              const msg = error instanceof Error ? error.message : String(error);
+              this.logger.appendLine(`TestExecutionService: taskkill spawn failed: ${msg}`);
+            }
+          }
+
+          try {
+            childProcess.kill(force ? 'SIGKILL' : 'SIGTERM');
+          } catch {
+            // ignored
+          }
+          return;
+        }
+
+        if (childProcess.pid) {
+          try {
+            process.kill(-childProcess.pid, force ? 'SIGKILL' : 'SIGTERM');
+            return;
+          } catch {
+            // fallback below
+          }
+        }
+
+        try {
+          childProcess.kill(force ? 'SIGKILL' : 'SIGTERM');
+        } catch {
+          // ignored
+        }
+      };
 
       // Wire cancellation token to kill the child process
       if (options.token) {
         if (options.token.isCancellationRequested) {
           processKilled = true;
-          childProcess.kill('SIGTERM');
+          killProcessTree(false);
           resolve({ success: false, output: 'Test run was cancelled' });
           return;
         }
         cancellationListener = options.token.onCancellationRequested(() => {
           if (!childProcess.killed && !processKilled) {
-            this.logger.appendLine('TestExecutionService: Cancellation requested - killing batch process');
+            this.logger.appendLine('TestExecutionService: Cancellation requested - killing batch process tree');
             processKilled = true;
-            childProcess.kill('SIGTERM');
+            killProcessTree(false);
             setTimeout(() => {
               if (!childProcess.killed) {
-                childProcess.kill('SIGKILL');
+                killProcessTree(true);
               }
             }, 5000);
           }
@@ -87,12 +137,12 @@ export class TestExecutionService {
       const batchTimeoutMs = batchTimeoutCfg.testTimeout * 1000;
       timeoutId = setTimeout(() => {
         if (!childProcess.killed && !processKilled) {
-          this.logger.appendLine(`TestExecutionService: Batch timeout - killing process after ${batchTimeoutCfg.testTimeout} seconds`);
+          this.logger.appendLine(`TestExecutionService: Batch timeout - killing process tree after ${batchTimeoutCfg.testTimeout} seconds`);
           processKilled = true;
-          childProcess.kill('SIGTERM');
+          killProcessTree(false);
           setTimeout(() => {
             if (!childProcess.killed) {
-              childProcess.kill('SIGKILL');
+              killProcessTree(true);
             }
           }, 10000);
           resolve({ success: false, output: `Test execution timed out after ${batchTimeoutCfg.testTimeout} seconds` });
@@ -149,4 +199,5 @@ export class TestExecutionService {
       });
     });
   }
+
 }

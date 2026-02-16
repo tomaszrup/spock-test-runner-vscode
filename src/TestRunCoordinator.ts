@@ -10,6 +10,15 @@ import { TestData, BuildTool } from './types';
 import { TestTreeManager } from './TestTreeManager';
 import { ResultProcessor } from './ResultProcessor';
 
+/** Entry tracked per test in the lookup map during a batch run. */
+interface TestLookupEntry {
+  test: vscode.TestItem;
+  data: TestData;
+  resolved: boolean;
+  /** Status seen during real-time Gradle output parsing (`undefined` if never seen). */
+  seenStatus?: 'PASSED' | 'FAILED' | 'SKIPPED';
+}
+
 /**
  * Orchestrates test execution: run profiles, batch execution, continuous run,
  * re-run-failed, progress reporting, and coverage collection.
@@ -24,6 +33,14 @@ export class TestRunCoordinator {
   private debugService: DebugService;
   private notifiedBuildFailure = false;
   private notifiedCoverageMissing = false;
+  /** Buffers error lines after a FAILED marker so the failure can be
+   *  reported with full error details as soon as the next test boundary
+   *  arrives (or the batch ends). */
+  private pendingFailure: {
+    entry: TestLookupEntry;
+    failedLine: string;
+    errorLines: string[];
+  } | null = null;
 
   constructor(
     private controller: vscode.TestController,
@@ -365,6 +382,7 @@ export class TestRunCoordinator {
     debugPort?: number,
   ): Promise<void> {
     const start = Date.now();
+    this.pendingFailure = null;
 
     // Detect build tool & project layout
     const { buildTool, rootProject, subprojectPrefix } =
@@ -412,7 +430,7 @@ export class TestRunCoordinator {
   private async runGradleBatchWithSplitting(
     testFilters: string[],
     classTestCounts: Map<string, number>,
-    testLookup: Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>,
+    testLookup: Map<string, TestLookupEntry>,
     tests: Array<{test: vscode.TestItem; data: TestData}>,
     debug: boolean,
     rootProject: string,
@@ -472,6 +490,9 @@ export class TestRunCoordinator {
         onOutputLine: (line: string) => this.handleRealTimeOutputLine(line, testLookup, run, start),
       });
 
+      // Flush the last pending failure from this sub-batch
+      this.flushPendingFailure(run, start);
+
       // Merge results
       combinedResult.output += result.output + '\n';
       if (!result.success) {
@@ -519,7 +540,7 @@ export class TestRunCoordinator {
    */
   private async runSingleBatch(
     testFilters: string[],
-    testLookup: Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>,
+    testLookup: Map<string, TestLookupEntry>,
     tests: Array<{test: vscode.TestItem; data: TestData}>,
     debug: boolean,
     rootProject: string,
@@ -553,6 +574,9 @@ export class TestRunCoordinator {
       token,
       onOutputLine: (line: string) => this.handleRealTimeOutputLine(line, testLookup, run, start),
     });
+
+    // Flush the last pending failure from this batch
+    this.flushPendingFailure(run, start);
 
     if (token.isCancellationRequested) {
       for (const [, entry] of testLookup) {
@@ -617,17 +641,17 @@ export class TestRunCoordinator {
 
   private buildTestLookup(tests: Array<{test: vscode.TestItem; data: TestData}>): {
     testFilters: string[];
-    testLookup: Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>;
+    testLookup: Map<string, TestLookupEntry>;
   } {
     const testFilters: string[] = [];
-    const testLookup = new Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>();
+    const testLookup = new Map<string, TestLookupEntry>();
 
     for (const item of tests) {
       const classId = item.data.classFqn || item.data.className;
       if (classId && item.data.testName) {
         testFilters.push(`${classId}.${item.data.testName}`);
         const key = `${classId}#${item.data.testName}`;
-        testLookup.set(key, {...item, resolved: false});
+        testLookup.set(key, {...item, resolved: false, seenStatus: undefined});
       } else {
         this.logger.appendLine(`TestRunCoordinator: Skipping test with missing className=${item.data.className} classFqn=${item.data.classFqn} testName=${item.data.testName}`);
       }
@@ -671,16 +695,27 @@ export class TestRunCoordinator {
 
   private handleRealTimeOutputLine(
     line: string,
-    testLookup: Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>,
+    testLookup: Map<string, TestLookupEntry>,
     run: vscode.TestRun,
     start: number,
   ): void {
     const gradleMatch = line.match(/^\s*(\S+)\s+>\s+(.+?)\s+(PASSED|FAILED|SKIPPED)\s*$/);
-    if (!gradleMatch) { return; }
+
+    if (gradleMatch) {
+      // A new test-result boundary — flush any buffered failure first
+      // so the previous failing test is reported with its error details.
+      this.flushPendingFailure(run, start);
+    } else {
+      // Non-boundary line: if we're buffering a failure, capture it.
+      if (this.pendingFailure) {
+        this.pendingFailure.errorLines.push(line);
+      }
+      return;
+    }
 
     const className = gradleMatch[1];
     const testPart = gradleMatch[2].trim();
-    const status = gradleMatch[3];
+    const status = gradleMatch[3] as 'PASSED' | 'FAILED' | 'SKIPPED';
 
     if (testPart.includes(' > ') || /\[.*#\d+\]$/.test(testPart)) {
       return;
@@ -692,26 +727,70 @@ export class TestRunCoordinator {
     const key = `${className}#${testPart}`;
     let entry = testLookup.get(key);
     if (!entry) {
-      const simpleName = className.includes('.') ? className.substring(className.lastIndexOf('.') + 1) : undefined;
+      // Gradle may output FQN while lookup uses simple name, or vice-versa.
+      const simpleName = className.includes('.')
+        ? className.substring(className.lastIndexOf('.') + 1)
+        : undefined;
       if (simpleName) {
         entry = testLookup.get(`${simpleName}#${testPart}`);
+      }
+
+      // Reverse: Gradle outputs a simple name but lookup keys use FQN.
+      if (!entry && !className.includes('.')) {
+        const suffix = `.${className}#${testPart}`;
+        for (const [lookupKey, lookupEntry] of testLookup) {
+          if (lookupKey.endsWith(suffix)) {
+            entry = lookupEntry;
+            break;
+          }
+        }
       }
     }
 
     if (entry && !entry.resolved && !entry.data.isDataDriven) {
-      entry.resolved = true;
+      entry.seenStatus = status;
+
       if (status === 'PASSED') {
+        entry.resolved = true;
         run.passed(entry.test, Date.now() - start);
       } else if (status === 'FAILED') {
-        entry.resolved = false;
+        // Buffer this failure — error details follow on subsequent lines.
+        // The failure will be reported (with error details) when the next
+        // test-result boundary arrives or the batch ends.
+        this.pendingFailure = {
+          entry,
+          failedLine: line,
+          errorLines: [],
+        };
       } else {
+        entry.resolved = true;
         run.skipped(entry.test);
       }
     }
   }
 
+  /**
+   * Flush the buffered pending failure (if any), reporting it as failed
+   * with the error details accumulated from subsequent output lines.
+   */
+  private flushPendingFailure(run: vscode.TestRun, start: number): void {
+    if (!this.pendingFailure) { return; }
+
+    const { entry, failedLine, errorLines } = this.pendingFailure;
+    this.pendingFailure = null;
+
+    if (entry.resolved) { return; }
+
+    const classId = entry.data.classFqn || entry.data.className!;
+    const scopedOutput = [failedLine, ...errorLines].join('\n');
+    const errorMessage = extractErrorForTest(scopedOutput, classId, entry.data.testName!);
+
+    entry.resolved = true;
+    run.failed(entry.test, this.resultProcessor.createTestMessage(errorMessage), Date.now() - start);
+  }
+
   private async resolveDataDrivenResults(
-    testLookup: Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>,
+    testLookup: Map<string, TestLookupEntry>,
     result: any,
     run: vscode.TestRun,
     projectRoot: string,
@@ -749,7 +828,7 @@ export class TestRunCoordinator {
   }
 
   private async resolveViaXmlReports(
-    testLookup: Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>,
+    testLookup: Map<string, TestLookupEntry>,
     run: vscode.TestRun,
     projectRoot: string,
     buildTool: BuildTool,
@@ -797,42 +876,59 @@ export class TestRunCoordinator {
   }
 
   private resolveFinalFallback(
-    testLookup: Map<string, {test: vscode.TestItem; data: TestData; resolved: boolean}>,
+    testLookup: Map<string, TestLookupEntry>,
     result: any,
     run: vscode.TestRun,
     start: number,
     hasBuildFailureSignal: boolean,
   ): void {
     for (const [, entry] of testLookup) {
-      if (!entry.resolved) {
-        if (result.success) {
-          // Overall batch passed — all unresolved tests must have passed
-          run.passed(entry.test, Date.now() - start);
+      if (entry.resolved) {
+        continue;
+      }
+
+      // ── 1. Test was seen as PASSED in real-time output ──────────────
+      // Belt-and-suspenders: real-time handler already resolved these,
+      // but in case XML resolution un-resolved them, honour the status.
+      if (entry.seenStatus === 'PASSED') {
+        run.passed(entry.test, Date.now() - start);
+        continue;
+      }
+
+      // ── 2. Test was seen as FAILED in real-time output ─────────────
+      // Extract only THIS test's error — never show the whole batch.
+      if (entry.seenStatus === 'FAILED') {
+        const classId = entry.data.classFqn || entry.data.className!;
+        const errorMessage = extractErrorForTest(result.output, classId, entry.data.testName!);
+        run.failed(entry.test, this.resultProcessor.createTestMessage(errorMessage), Date.now() - start);
+        continue;
+      }
+
+      // ── 3. Test was never seen in real-time output ─────────────────
+      if (result.success) {
+        // Overall batch passed — test must have passed too.
+        run.passed(entry.test, Date.now() - start);
+      } else {
+        // Batch failed (non-zero exit).  First, check whether the
+        // output contains a per-test failure line for THIS test.
+        const classId = entry.data.classFqn || entry.data.className!;
+        const testError = hasErrorForTest(result.output, classId, entry.data.testName!);
+        if (testError) {
+          const errorMessage = extractErrorForTest(result.output, classId, entry.data.testName!);
+          run.failed(entry.test, this.resultProcessor.createTestMessage(errorMessage), Date.now() - start);
+        } else if (hasBuildFailureSignal) {
+          // Compilation / build failure — mark errored.
+          const buildFailureMessage = this.extractBuildFailureMessage(result.output);
+          run.errored(
+            entry.test,
+            this.resultProcessor.createTestMessage(buildFailureMessage),
+            Date.now() - start,
+          );
         } else {
-          // Batch failed — check if THIS SPECIFIC test failed, not just the class.
-          // hasErrorForClass is too broad: it returns true for all tests in a class
-          // even if only one test failed. We need per-test granularity.
-          const classId = entry.data.classFqn || entry.data.className!;
-          const testError = hasErrorForTest(result.output, classId, entry.data.testName!);
-          if (testError) {
-            const errorMessage = extractErrorForTest(result.output, classId, entry.data.testName!);
-            run.failed(entry.test, this.resultProcessor.createTestMessage(errorMessage), Date.now() - start);
-          } else if (hasBuildFailureSignal) {
-            const buildFailureMessage = this.extractBuildFailureMessage(result.output);
-            run.errored(
-              entry.test,
-              this.resultProcessor.createTestMessage(buildFailureMessage),
-              Date.now() - start,
-            );
-          } else {
-            // Batch failed but we have no per-test failure and no build signal.
-            // Treat this as errored (execution uncertainty), never as passed.
-            const fallbackMsg = this.extractBuildFailureMessage(result.output);
-            const unresolvedMessage = fallbackMsg && !fallbackMsg.startsWith('Build failed')
-              ? fallbackMsg
-              : 'Test execution failed before the result for this test could be determined.';
-            run.errored(entry.test, this.resultProcessor.createTestMessage(unresolvedMessage), Date.now() - start);
-          }
+          // No evidence this test failed and no build failure signal —
+          // the non-zero exit code is from OTHER tests.
+          // Mark as passed rather than errored.
+          run.passed(entry.test, Date.now() - start);
         }
       }
     }
@@ -843,15 +939,37 @@ export class TestRunCoordinator {
       return false;
     }
 
-    return (
+    // ── Unambiguous compilation / infrastructure failures ──────────
+    if (/\bCompilation failed\b/i.test(output)) { return true; }
+    if (/\bCOMPILATION ERROR\b/i.test(output)) { return true; }
+
+    // Gradle compile-task failure (compileGroovy, compileJava, etc.)
+    if (/^\s*>\s*Task\s+:[\w:]*compile\w*\s+FAILED\s*$/im.test(output)) { return true; }
+
+    // Maven compiler-plugin failure
+    if (/^\s*\[ERROR\]\s+Failed to execute goal\s+.*maven-compiler-plugin/im.test(output)) { return true; }
+
+    // ── Generic "BUILD FAILED" – only count it when it is NOT caused
+    //    by test failures alone.  Gradle prints "There were failing tests"
+    //    and Maven prints "There are test failures" when the exit code is
+    //    due to test failures rather than a build problem. ─────────────
+    const hasBuildFailed =
       /\bBUILD FAILED\b/i.test(output)
       || /\bBUILD FAILURE\b/i.test(output)
       || /Execution failed for task\s+['"]?:[^'"\s]+['"]?/i.test(output)
-      || /\bCompilation failed; see the compiler error output for details\b/i.test(output)
-      || /\bCOMPILATION ERROR\b/i.test(output)
       || /^\s*\[ERROR\]\s+Failed to execute goal\s+/im.test(output)
-      || /^\s*>\s*Task\s+:[^\n\r]+\s+FAILED\s*$/im.test(output)
-    );
+      || /^\s*>\s*Task\s+:[^\n\r]+\s+FAILED\s*$/im.test(output);
+
+    if (hasBuildFailed) {
+      const isTestFailureExit =
+        /There were failing tests/i.test(output)
+        || /There are test failures/i.test(output);
+      if (!isTestFailureExit) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   private extractBuildFailureMessage(output: string): string {
@@ -896,6 +1014,9 @@ export class TestRunCoordinator {
       if (/^\[DEBUG\]/i.test(t)) { return true; }
       // Test result summary lines
       if (/^\S+\s+>\s+\S+.*\s+(PASSED|SKIPPED)\s*$/i.test(t)) { return true; }
+      // Gradle 8.x internal mapping diagnostics ("Failed to map supported failure")
+      if (/Failed to map supported failure/i.test(t)) { return true; }
+      if (/with mapper.*OpenTest/i.test(t)) { return true; }
       return false;
     };
 

@@ -183,6 +183,12 @@ export function extractErrorForTest(output: string, className: string, testName:
       break;
     }
 
+    // Skip Gradle 8.x internal mapping diagnostics — these are not
+    // part of the actual test failure output.
+    if (/Failed to map supported failure/i.test(trimmed) || /with mapper.*OpenTest/i.test(trimmed)) {
+      continue;
+    }
+
     if (testHeaderRegex.test(trimmed)) {
       capturingStandardOutput = true;
       seenStandardOutputContent = false;

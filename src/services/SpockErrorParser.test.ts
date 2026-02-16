@@ -153,6 +153,23 @@ describe('SpockErrorParser', () => {
       const result = extractErrorForTest(output, 'MySpec', 'test');
       expect(result).toBe('Test failed');
     });
+
+    it('should filter out Gradle "Failed to map supported failure" diagnostic lines', () => {
+      const output = [
+        'MySpec > should add FAILED',
+        "Failed to map supported failure 'Condition not satisfied:'",
+        " with mapper 'org.gradle.api.internal.tasks.testing.failure.mappers.OpenTestAssertionFailureMapper'",
+        'Condition not satisfied:',
+        '  1 + 1 == 3',
+        '  |   |',
+        '  2   false',
+        'at com.example.MySpec.should add(MySpec.groovy:12)',
+      ].join('\n');
+      const result = extractErrorForTest(output, 'MySpec', 'should add');
+      expect(result).toContain('Condition not satisfied');
+      expect(result).not.toContain('Failed to map supported failure');
+      expect(result).not.toContain('OpenTestAssertionFailureMapper');
+    });
   });
 
   // ── hasErrorForClass ───────────────────────────────────────────────

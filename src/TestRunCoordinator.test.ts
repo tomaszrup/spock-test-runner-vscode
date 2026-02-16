@@ -572,6 +572,36 @@ describe('TestRunCoordinator', () => {
 
       expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
     });
+
+    it('should resolve tests when Gradle outputs simple name but lookup uses classFqn', async () => {
+      const run = createMockRun();
+      const passedSpy = run.passed;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should add', vscode.Uri.file('/workspace/project/spec.groovy'));
+      // classFqn is set — the lookup key will be "com.example.CalculatorSpec#should add"
+      treeManager.testData.set(test1, {
+        type: 'test',
+        className: 'CalculatorSpec',
+        classFqn: 'com.example.CalculatorSpec',
+        testName: 'should add',
+      });
+
+      // Gradle outputs simple name "CalculatorSpec" (not the FQN)
+      executionService.executeBatch.mockImplementation(async (opts: any) => {
+        if (opts.onOutputLine) {
+          opts.onOutputLine('CalculatorSpec > should add PASSED');
+        }
+        return { success: true, output: 'CalculatorSpec > should add PASSED' };
+      });
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      // Should still match via the reverse lookup (simple → FQN)
+      expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
+    });
   });
 
   // ── Fallback result reporting ────────────────────────────────────
@@ -895,6 +925,184 @@ describe('TestRunCoordinator', () => {
         expect.objectContaining({ message: 'Test failed' }),
         expect.any(Number),
       );
+    });
+
+    it('should mark passing test as passed when only other tests fail in the batch', async () => {
+      const { extractErrorForTest } = await import('./services/SpockErrorParser');
+      const extractMock = vi.mocked(extractErrorForTest);
+      extractMock.mockImplementation(
+        (_output: string, _className: string, testName: string) =>
+          testName === 'should subtract' ? 'Condition not satisfied:\n  result == 3' : 'Test failed',
+      );
+
+      const run = createMockRun();
+      const passedSpy = run.passed;
+      const failedSpy = run.failed;
+      const erroredSpy = run.errored;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should add', vscode.Uri.file('/workspace/project/spec.groovy'));
+      const test2 = controller.createTestItem('t2', 'should subtract', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'CalculatorSpec', testName: 'should add' });
+      treeManager.testData.set(test2, { type: 'test', className: 'CalculatorSpec', testName: 'should subtract' });
+
+      // Simulate real-time output where test1 passes and test2 fails
+      // Error lines come AFTER the FAILED marker, before the next test
+      executionService.executeBatch.mockImplementation(async (opts: any) => {
+        if (opts.onOutputLine) {
+          opts.onOutputLine('com.example.CalculatorSpec > should add PASSED');
+          opts.onOutputLine('com.example.CalculatorSpec > should subtract FAILED');
+          opts.onOutputLine('Condition not satisfied:');
+          opts.onOutputLine('  result == 3');
+          opts.onOutputLine('  |         |');
+          opts.onOutputLine('  0         false');
+        }
+        return {
+          success: false,
+          output: [
+            'com.example.CalculatorSpec > should add PASSED',
+            'com.example.CalculatorSpec > should subtract FAILED',
+            'Condition not satisfied:',
+            '  result == 3',
+          ].join('\n'),
+        };
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1, test2]);
+      await coordinator.runHandler(false, request, token);
+
+      // test1 was seen as PASSED in real-time → should be passed
+      expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
+      // test2 was seen as FAILED → should be failed with error details from buffered lines
+      expect(failedSpy).toHaveBeenCalledWith(
+        test2,
+        expect.objectContaining({ message: expect.stringContaining('Condition not satisfied') }),
+        expect.any(Number),
+      );
+      // Neither should be errored
+      expect(erroredSpy).not.toHaveBeenCalled();
+
+      // Restore default mock
+      extractMock.mockImplementation(() => 'Test failed');
+    });
+
+    it('should mark unseen test as passed when batch fails due to other tests', async () => {
+      const run = createMockRun();
+      const passedSpy = run.passed;
+      const erroredSpy = run.errored;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should add', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'CalculatorSpec', testName: 'should add' });
+
+      // Batch fails but output has no evidence this test failed and no build failure
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: 'OtherSpec > other test FAILED\nCondition not satisfied:\n  x == 1',
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      // No per-test failure for test1, no build failure signal → should pass
+      expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
+      expect(erroredSpy).not.toHaveBeenCalled();
+    });
+
+    it('should report failure with error details during real-time output, not after batch ends', async () => {
+      const { extractErrorForTest } = await import('./services/SpockErrorParser');
+      const extractMock = vi.mocked(extractErrorForTest);
+      extractMock.mockImplementation(
+        (_output: string, _className: string, testName: string) =>
+          testName === 'should subtract' ? 'Condition not satisfied:\n  1 - 1 == 2' : 'Test failed',
+      );
+
+      const run = createMockRun();
+      const failedSpy = run.failed;
+      const passedSpy = run.passed;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should subtract', vscode.Uri.file('/workspace/project/spec.groovy'));
+      const test2 = controller.createTestItem('t2', 'should multiply', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'CalculatorSpec', testName: 'should subtract' });
+      treeManager.testData.set(test2, { type: 'test', className: 'CalculatorSpec', testName: 'should multiply' });
+
+      const callOrder: string[] = [];
+      // Track call order to prove failure is reported BEFORE second test's pass
+      (failedSpy as any).mockImplementation(() => { callOrder.push('failed'); });
+      (passedSpy as any).mockImplementation(() => { callOrder.push('passed'); });
+
+      executionService.executeBatch.mockImplementation(async (opts: any) => {
+        if (opts.onOutputLine) {
+          opts.onOutputLine('CalculatorSpec > should subtract FAILED');
+          opts.onOutputLine('Condition not satisfied:');
+          opts.onOutputLine('  1 - 1 == 2');
+          opts.onOutputLine('  |   |');
+          opts.onOutputLine('  0   false');
+          opts.onOutputLine('at com.example.CalculatorSpec.should subtract(CalculatorSpec.groovy:15)');
+          // Next test boundary triggers flush of the failure above
+          opts.onOutputLine('CalculatorSpec > should multiply PASSED');
+        }
+        return { success: false, output: '' };
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1, test2]);
+      await coordinator.runHandler(false, request, token);
+
+      // Failure should be reported with the Condition not satisfied block
+      expect(failedSpy).toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: expect.stringContaining('Condition not satisfied') }),
+        expect.any(Number),
+      );
+      // The failure must have been reported BEFORE the pass (during real-time output)
+      expect(callOrder[0]).toBe('failed');
+      expect(callOrder[1]).toBe('passed');
+
+      // Restore default mock
+      extractMock.mockImplementation(() => 'Test failed');
+    });
+
+    it('should not treat test-only failures as build failures (Gradle "There were failing tests")', async () => {
+      const run = createMockRun();
+      const passedSpy = run.passed;
+      const erroredSpy = run.errored;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should add', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'CalculatorSpec', testName: 'should add' });
+
+      // Simulates Gradle output when tests fail: BUILD FAILED + "There were failing tests"
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: [
+          'OtherSpec > broken test FAILED',
+          'Condition not satisfied:',
+          '  value == "expected non-null"',
+          '> Task :test FAILED',
+          '227 tests completed, 23 failed, 1 skipped',
+          'FAILURE: Build failed with an exception.',
+          '* What went wrong:',
+          "Execution failed for task ':test'.",
+          '> There were failing tests. See the report at: file:///...',
+        ].join('\n'),
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      // This test has no per-test failure and the "BUILD FAILED" is from test
+      // failures (not compilation), so it should NOT be errored.
+      expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
+      expect(erroredSpy).not.toHaveBeenCalled();
     });
   });
 });
