@@ -707,7 +707,9 @@ export class TestRunCoordinator {
       this.flushPendingFailure(run, start);
     } else {
       // Non-boundary line: if we're buffering a failure, capture it.
-      if (this.pendingFailure) {
+      // Skip Gradle "> Task" noise lines — they don't contribute to
+      // error details and drown out the actual exception in per-test output.
+      if (this.pendingFailure && !/^\s*>\s*Task\s+/i.test(line)) {
         this.pendingFailure.errorLines.push(line);
       }
       return;

@@ -988,6 +988,72 @@ describe('TestRunCoordinator', () => {
       extractMock.mockImplementation(() => 'Test failed');
     });
 
+    it('should filter > Task noise lines from buffered failure error lines', async () => {
+      const { extractErrorForTest } = await import('./services/SpockErrorParser');
+      const extractMock = vi.mocked(extractErrorForTest);
+      // Verify the scoped output passed to extractErrorForTest does NOT contain > Task lines
+      extractMock.mockImplementation((output: string, _className: string, _testName: string) => {
+        // If > Task lines leaked into the scoped output, the test will fail
+        if (/>\s*Task\s+/i.test(output)) {
+          return 'BUG: > Task lines leaked into error output';
+        }
+        return 'Condition not satisfied:\n  result == 3';
+      });
+
+      const run = createMockRun();
+      const failedSpy = run.failed;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should add', vscode.Uri.file('/workspace/project/spec.groovy'));
+      const test2 = controller.createTestItem('t2', 'should subtract', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'CalculatorSpec', testName: 'should add' });
+      treeManager.testData.set(test2, { type: 'test', className: 'CalculatorSpec', testName: 'should subtract' });
+
+      // Simulate output with many > Task lines between FAILED and the error details
+      executionService.executeBatch.mockImplementation(async (opts: any) => {
+        if (opts.onOutputLine) {
+          opts.onOutputLine('com.example.CalculatorSpec > should subtract FAILED');
+          // Many > Task lines from subproject builds
+          opts.onOutputLine('> Task :sub1:compileJava UP-TO-DATE');
+          opts.onOutputLine('> Task :sub2:compileJava UP-TO-DATE');
+          opts.onOutputLine('> Task :sub3:processResources NO-SOURCE');
+          opts.onOutputLine('> Task :sub4:classes UP-TO-DATE');
+          opts.onOutputLine('> Task :sub5:compileTestJava UP-TO-DATE');
+          opts.onOutputLine('> Task :sub6:compileTestGroovy UP-TO-DATE');
+          opts.onOutputLine('> Task :sub7:jar UP-TO-DATE');
+          opts.onOutputLine('> Task :sub8:test SKIPPED');
+          opts.onOutputLine('> Task :sub9:check UP-TO-DATE');
+          opts.onOutputLine('> Task :sub10:build UP-TO-DATE');
+          // Actual error details
+          opts.onOutputLine('Condition not satisfied:');
+          opts.onOutputLine('  result == 3');
+          // Next test triggers flush
+          opts.onOutputLine('com.example.CalculatorSpec > should add PASSED');
+        }
+        return { success: false, output: '' };
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1, test2]);
+      await coordinator.runHandler(false, request, token);
+
+      // The error message should NOT contain the "BUG" string
+      // (which extractMock returns when > Task lines are present in the scoped output)
+      expect(failedSpy).toHaveBeenCalledWith(
+        test2,
+        expect.objectContaining({ message: expect.stringContaining('Condition not satisfied') }),
+        expect.any(Number),
+      );
+      expect(failedSpy).not.toHaveBeenCalledWith(
+        test2,
+        expect.objectContaining({ message: expect.stringContaining('BUG') }),
+        expect.any(Number),
+      );
+
+      extractMock.mockImplementation(() => 'Test failed');
+    });
+
     it('should mark unseen test as passed when batch fails due to other tests', async () => {
       const run = createMockRun();
       const passedSpy = run.passed;

@@ -264,5 +264,99 @@ describe('TestExecutionService', () => {
       await promise;
       expect(mockStartDebugSession).toHaveBeenCalled();
     });
+
+    it('should filter > Task noise lines from appendOutput', async () => {
+      const promise = service.executeBatch({
+        commandArgs: ['gradle', 'test'],
+        workspacePath: '/project',
+        run,
+        testItems: [],
+        debug: false,
+      });
+      fakeProc.stdout.emit('data', Buffer.from(
+        '> Task :sub1:compileJava UP-TO-DATE\n'
+        + '> Task :sub2:compileJava NO-SOURCE\n'
+        + '> Task :sub3:processResources UP-TO-DATE\n'
+        + 'CalculatorSpec > addition PASSED\n'
+        + '> Task :sub4:classes UP-TO-DATE\n'
+      ));
+      fakeProc.emit('close', 0);
+      await promise;
+
+      // appendOutput should NOT contain the > Task noise lines
+      const allCalls = run.appendOutput.mock.calls.map((c: any[]) => c[0]).join('');
+      expect(allCalls).not.toContain('> Task :sub1:compileJava UP-TO-DATE');
+      expect(allCalls).not.toContain('> Task :sub2:compileJava NO-SOURCE');
+      expect(allCalls).not.toContain('> Task :sub4:classes UP-TO-DATE');
+      // But real test output should still appear
+      expect(allCalls).toContain('CalculatorSpec > addition PASSED');
+    });
+
+    it('should keep > Task FAILED lines in appendOutput', async () => {
+      const promise = service.executeBatch({
+        commandArgs: ['gradle', 'test'],
+        workspacePath: '/project',
+        run,
+        testItems: [],
+        debug: false,
+      });
+      fakeProc.stdout.emit('data', Buffer.from(
+        '> Task :sub1:compileJava UP-TO-DATE\n'
+        + '> Task :compileTestGroovy FAILED\n'
+        + 'Compilation failed; see the compiler error output for details.\n'
+      ));
+      fakeProc.emit('close', 1);
+      await promise;
+
+      const allCalls = run.appendOutput.mock.calls.map((c: any[]) => c[0]).join('');
+      // FAILED task lines should be kept
+      expect(allCalls).toContain('> Task :compileTestGroovy FAILED');
+      // UP-TO-DATE noise should be filtered
+      expect(allCalls).not.toContain('> Task :sub1:compileJava UP-TO-DATE');
+      // Compilation error should appear
+      expect(allCalls).toContain('Compilation failed');
+    });
+
+    it('should still include all lines in output for parsing', async () => {
+      const promise = service.executeBatch({
+        commandArgs: ['gradle', 'test'],
+        workspacePath: '/project',
+        run,
+        testItems: [],
+        debug: false,
+      });
+      fakeProc.stdout.emit('data', Buffer.from(
+        '> Task :sub1:compileJava UP-TO-DATE\n'
+        + 'CalculatorSpec > addition PASSED\n'
+      ));
+      fakeProc.emit('close', 0);
+      const result = await promise;
+
+      // The raw output should contain everything (used for parsing)
+      expect(result.output).toContain('> Task :sub1:compileJava UP-TO-DATE');
+      expect(result.output).toContain('CalculatorSpec > addition PASSED');
+    });
+
+    it('should still forward all lines to onOutputLine (unfiltered)', async () => {
+      const lines: string[] = [];
+      const promise = service.executeBatch({
+        commandArgs: ['gradle', 'test'],
+        workspacePath: '/project',
+        run,
+        testItems: [],
+        debug: false,
+        onOutputLine: (line) => lines.push(line),
+      });
+      fakeProc.stdout.emit('data', Buffer.from(
+        '> Task :sub1:compileJava UP-TO-DATE\n'
+        + 'CalculatorSpec > addition PASSED\n'
+      ));
+      fakeProc.emit('close', 0);
+      await promise;
+
+      // onOutputLine should receive ALL lines (needed for real-time test parsing)
+      expect(lines).toContain('> Task :sub1:compileJava UP-TO-DATE');
+      expect(lines).toContain('CalculatorSpec > addition PASSED');
+    });
   });
 });

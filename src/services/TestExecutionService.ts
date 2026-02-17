@@ -155,13 +155,23 @@ export class TestExecutionService {
       childProcess.stdout?.on('data', (data: Buffer) => {
         const text = data.toString();
         output += text;
-        const crlfText = text.replace(/\n/g, '\r\n');
-        options.run.appendOutput(crlfText);
 
+        // Split into complete lines for processing
+        lineBuffer += text;
+        const lines = lineBuffer.split('\n');
+        lineBuffer = lines.pop() || '';
+
+        // Display filtered output: remove Gradle "> Task" noise lines
+        // (e.g. "> Task :sub:compileJava UP-TO-DATE") that flood the
+        // test output panel in multi-subproject builds.
+        const filteredLines = lines.filter(line => !isGradleTaskNoiseLine(line));
+        if (filteredLines.length > 0) {
+          const filteredText = filteredLines.join('\r\n') + '\r\n';
+          options.run.appendOutput(filteredText);
+        }
+
+        // Forward ALL lines to callback (unfiltered) for test result parsing
         if (options.onOutputLine) {
-          lineBuffer += text;
-          const lines = lineBuffer.split('\n');
-          lineBuffer = lines.pop() || '';
           for (const line of lines) {
             options.onOutputLine(line);
           }
@@ -178,8 +188,14 @@ export class TestExecutionService {
       childProcess.on('close', (code: number | null) => {
         if (timeoutId) { clearTimeout(timeoutId); }
         cancellationListener?.dispose();
-        if (options.onOutputLine && lineBuffer.trim()) {
-          options.onOutputLine(lineBuffer);
+        // Flush remaining line buffer
+        if (lineBuffer.trim()) {
+          if (!isGradleTaskNoiseLine(lineBuffer)) {
+            options.run.appendOutput(lineBuffer.replace(/\n/g, '\r\n'));
+          }
+          if (options.onOutputLine) {
+            options.onOutputLine(lineBuffer);
+          }
         }
         if (processKilled && options.token?.isCancellationRequested) {
           this.logger.appendLine('TestExecutionService: Batch process closed after cancellation');
@@ -200,4 +216,18 @@ export class TestExecutionService {
     });
   }
 
+}
+
+/**
+ * Returns true for Gradle "> Task" lines that are build noise (not FAILED).
+ * These lines (e.g. "> Task :sub:compileJava UP-TO-DATE") flood the test
+ * output panel in multi-subproject builds and hide actual test results.
+ */
+function isGradleTaskNoiseLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!/^>\s*Task\s+/i.test(trimmed)) {
+    return false;
+  }
+  // Keep "> Task :xxx FAILED" lines — they indicate build failures
+  return !/FAILED\s*$/i.test(trimmed);
 }
