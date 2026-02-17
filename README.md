@@ -1,5 +1,5 @@
-![code status: vibed](https://img.shields.io/badge/code_status-Vibed-green)
-# Spock Test Runner for VS Code
+[![CI](https://github.com/TomaszRup/spock-test-runner-vscode/actions/workflows/ci.yml/badge.svg)](https://github.com/TomaszRup/spock-test-runner-vscode/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/TomaszRup/spock-test-runner-vscode/badges/.badges/coverage.json)](https://github.com/TomaszRup/spock-test-runner-vscode/actions/workflows/ci.yml)
 
 A VS Code extension that provides comprehensive test support for the [Spock testing framework](https://spockframework.org/) in Java/Groovy projects. It integrates with VS Code's Test API to offer seamless test discovery, execution, and debugging capabilities for Spock tests.
 
