@@ -5,9 +5,9 @@ node_modules
 *.vsix
 .DS_Store
 *.log
-sample-project/.gradle
-sample-project/build/
-sample-project/bin/
+sample/sample-project/.gradle
+sample/sample-project/build/
+sample/sample-project/bin/
 coverage/
 **/target/
 **/build/

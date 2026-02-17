@@ -1,0 +1,6 @@
+{
+    "sonarlint.connectedMode.project": {
+        "connectionId": "tomaszrup",
+        "projectKey": "tomaszrup_spock-test-runner-vscode"
+    }
+}

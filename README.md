@@ -1,9 +1,10 @@
 [![CI](https://github.com/TomaszRup/spock-test-runner-vscode/actions/workflows/ci.yml/badge.svg)](https://github.com/TomaszRup/spock-test-runner-vscode/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/TomaszRup/spock-test-runner-vscode/badges/.badges/coverage.json)](https://github.com/TomaszRup/spock-test-runner-vscode/actions/workflows/ci.yml)
 
+
 A VS Code extension that provides comprehensive test support for the [Spock testing framework](https://spockframework.org/) in Java/Groovy projects. It integrates with VS Code's Test API to offer seamless test discovery, execution, and debugging capabilities for Spock tests.
 
-**Version**: 0.0.9  
+**Version**: 0.0.17  
 **Author**: Tomasz Rup  
 **Original Author**: [Lukas Zaruba](https://github.com/LZaruba)
 
@@ -200,10 +201,15 @@ Gradle is checked first. If both `build.gradle` and `pom.xml` exist, Gradle take
 ├── resources/
 │   ├── coverage.init.gradle         # Gradle init script to inject JaCoCo for coverage
 │   └── force-tests.init.gradle      # Gradle init script to bypass up-to-date checks
-├── sample-project/                  # Sample Gradle + Spock project (Java 21, Spock 2.4-M1)
-│   └── sub-module/                  # Gradle sub-module for multi-module testing
-├── sample-maven-project/            # Sample Maven + Spock project (Java 21, Spock 2.4-M1)
-│   └── sub-module/                  # Maven sub-module for multi-module testing
+├── sample/
+│   ├── sample-project/              # Sample Gradle + Spock project (Java 21, Spock 2.4-M1)
+│   │   └── sub-module/              # Gradle sub-module for multi-module testing
+│   └── sample-maven-project/        # Sample Maven + Spock project (Java 21, Spock 2.4-M1)
+│       └── sub-module/              # Maven sub-module for multi-module testing
+├── .github/
+│   └── workflows/
+│       └── ci.yml                   # CI pipeline (test, coverage badges)
+├── sonar-project.properties         # SonarCloud analysis configuration
 ├── .vscode/
 │   ├── launch.json                  # Run/debug extension configurations
 │   ├── tasks.json                   # Build tasks
@@ -222,10 +228,10 @@ Gradle is checked first. If both `build.gradle` and `pom.xml` exist, Gradle take
 
 ## Sample Projects
 
-Two sample projects are included:
+Sample projects are included under the `sample/` directory:
 
-- **`sample-project/`** — Gradle-based project using Java 21, Groovy 4.0.15, and Spock 2.4-M1. Includes a `sub-module/` Gradle sub-project to exercise multi-module test discovery.
-- **`sample-maven-project/`** — Maven-based project with the same dependencies and test suites. Uses a multi-module layout with `pom` parent packaging and a `sub-module/`. Demonstrates Maven Surefire integration including the required `<execution>` binding for `pom`-packaged modules.
+- **`sample/sample-project/`** — Gradle-based project using Java 21, Groovy 4.0.15, and Spock 2.4-M1. Includes a `sub-module/` Gradle sub-project to exercise multi-module test discovery.
+- **`sample/sample-maven-project/`** — Maven-based project with the same dependencies and test suites. Uses a multi-module layout with `pom` parent packaging and a `sub-module/`. Demonstrates Maven Surefire integration including the required `<execution>` binding for `pom`-packaged modules.
 
 ### Test Specs
 
@@ -266,7 +272,7 @@ Two sample projects are included:
 
 To try it out:
 
-1. Open the `sample-project` folder in VS Code
+1. Open the `sample/sample-project` folder in VS Code
 2. Install the extension (or press F5 from the root project)
 3. Open the Test Explorer — tests are discovered automatically
 4. Run or debug any test
