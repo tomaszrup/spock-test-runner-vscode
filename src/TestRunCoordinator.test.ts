@@ -338,6 +338,49 @@ describe('TestRunCoordinator', () => {
       expect(skippedSpy).toHaveBeenCalledWith(ignoredTest);
       expect(run.started).not.toHaveBeenCalled();
     });
+
+    it('should use plain Gradle project task when request.include is undefined (run all)', async () => {
+      const run = createMockRun();
+      controller.createTestRun = vi.fn(() => run);
+
+      const project = controller.createTestItem('p1', 'project', vscode.Uri.file('/workspace/project'));
+      treeManager.testData.set(project, { type: 'project' });
+
+      const testItem = controller.createTestItem('t1', 'test one', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(testItem, { type: 'test', className: 'Spec', testName: 'test one' });
+      project.children.add(testItem);
+      controller.items.add(project);
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest();
+
+      await coordinator.runHandler(false, request, token);
+
+      const filterArgCalls = buildToolService.buildBatchCommandArgs.mock.calls.map((call: any[]) => call[0]);
+      expect(filterArgCalls.length).toBeGreaterThan(0);
+      expect(filterArgCalls.every((arg: string[]) => Array.isArray(arg) && arg.length === 0)).toBe(true);
+    });
+
+    it('should use plain Gradle project task when include targets project node', async () => {
+      const run = createMockRun();
+      controller.createTestRun = vi.fn(() => run);
+
+      const project = controller.createTestItem('p1', 'project', vscode.Uri.file('/workspace/project'));
+      treeManager.testData.set(project, { type: 'project' });
+
+      const testItem = controller.createTestItem('t1', 'test one', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(testItem, { type: 'test', className: 'Spec', testName: 'test one' });
+      project.children.add(testItem);
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([project]);
+
+      await coordinator.runHandler(false, request, token);
+
+      const filterArgCalls = buildToolService.buildBatchCommandArgs.mock.calls.map((call: any[]) => call[0]);
+      expect(filterArgCalls.length).toBeGreaterThan(0);
+      expect(filterArgCalls.every((arg: string[]) => Array.isArray(arg) && arg.length === 0)).toBe(true);
+    });
   });
 
   // ── Progress bar delta fix ───────────────────────────────────────

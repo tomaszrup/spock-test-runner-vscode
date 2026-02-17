@@ -253,6 +253,9 @@ export class TestRunCoordinator {
       }
     }
 
+    const runWholeProjectTask = this.shouldRunWholeProjectTask(request);
+    this.logger.appendLine(`TestRunCoordinator: whole-project fast path=${runWholeProjectTask}`);
+
     // Phase 1: Collect all leaf test items
     const leafTests: Array<{test: vscode.TestItem; data: TestData}> = [];
     const queue: vscode.TestItem[] = [];
@@ -326,8 +329,6 @@ export class TestRunCoordinator {
 
     // Phase 3: Execute each group
     const totalTests = leafTests.length;
-    let completedTests = 0;
-    let lastReportedPct = 0;
     const runDebugPort = await this.resolveRunDebugPort(debug);
     const runCancellationSource = new vscode.CancellationTokenSource();
     const upstreamCancellation = token.onCancellationRequested(() => runCancellationSource.cancel());
@@ -340,6 +341,55 @@ export class TestRunCoordinator {
           cancellable: true,
         },
         async (progress, progressToken) => {
+          let completedTests = 0;
+          let lastReportedPct = 0;
+          const completedTestIds = new Set<string>();
+
+          const reportCompletedTest = (test: vscode.TestItem) => {
+            if (completedTestIds.has(test.id)) {
+              return;
+            }
+            completedTestIds.add(test.id);
+            completedTests += 1;
+            const pct = Math.round((completedTests / totalTests) * 100);
+            const delta = pct - lastReportedPct;
+            lastReportedPct = pct;
+            progress.report({ message: `${completedTests} / ${totalTests} tests`, increment: Math.max(0, delta) });
+          };
+
+          const originalPassed = trackingRun.passed.bind(trackingRun);
+          const originalFailed = trackingRun.failed.bind(trackingRun);
+          const originalSkipped = trackingRun.skipped.bind(trackingRun);
+          const originalErrored = trackingRun.errored.bind(trackingRun);
+
+          trackingRun.passed = (test: vscode.TestItem, duration?: number) => {
+            reportCompletedTest(test);
+            return originalPassed(test, duration);
+          };
+
+          trackingRun.failed = (
+            test: vscode.TestItem,
+            message: vscode.TestMessage | readonly vscode.TestMessage[],
+            duration?: number,
+          ) => {
+            reportCompletedTest(test);
+            return originalFailed(test, message, duration);
+          };
+
+          trackingRun.skipped = (test: vscode.TestItem) => {
+            reportCompletedTest(test);
+            return originalSkipped(test);
+          };
+
+          trackingRun.errored = (
+            test: vscode.TestItem,
+            message: vscode.TestMessage | readonly vscode.TestMessage[],
+            duration?: number,
+          ) => {
+            reportCompletedTest(test);
+            return originalErrored(test, message, duration);
+          };
+
           const progressCancellation = progressToken.onCancellationRequested(() => {
             this.logger.appendLine('TestRunCoordinator: Run cancelled from progress notification');
             runCancellationSource.cancel();
@@ -350,14 +400,22 @@ export class TestRunCoordinator {
 
             for (const [projectRoot, tests] of groups) {
               if (runCancellationSource.token.isCancellationRequested) { break; }
-              await this.runBatch(projectRoot, tests, trackingRun, debug, runCancellationSource.token, coverage, runDebugPort);
-              completedTests += tests.length;
-              const pct = Math.round((completedTests / totalTests) * 100);
-              const delta = pct - lastReportedPct;
-              lastReportedPct = pct;
-              progress.report({ message: `${completedTests} / ${totalTests} tests`, increment: delta });
+              await this.runBatch(
+                projectRoot,
+                tests,
+                trackingRun,
+                debug,
+                runCancellationSource.token,
+                coverage,
+                runDebugPort,
+                runWholeProjectTask,
+              );
             }
           } finally {
+            trackingRun.passed = originalPassed;
+            trackingRun.failed = originalFailed;
+            trackingRun.skipped = originalSkipped;
+            trackingRun.errored = originalErrored;
             progressCancellation.dispose();
           }
         },
@@ -380,6 +438,7 @@ export class TestRunCoordinator {
     token: vscode.CancellationToken,
     coverage: boolean = false,
     debugPort?: number,
+    runWholeProjectTask: boolean = false,
   ): Promise<void> {
     const start = Date.now();
     this.pendingFailure = null;
@@ -406,6 +465,17 @@ export class TestRunCoordinator {
     // Compute per-class method counts from the full test tree for wildcard coalescing
     const classTestCounts = this.buildClassTestCounts(tests);
 
+    // Fast path for whole-project Gradle runs: invoke project test task without --tests filters.
+    if (runWholeProjectTask && buildTool === 'gradle') {
+      this.logger.appendLine('TestRunCoordinator: Whole-project Gradle run detected — executing plain project test task');
+      await this.runSingleBatch(
+        [], testLookup, tests,
+        debug, rootProject, subprojectPrefix, coverage, buildTool,
+        run, token, start, projectRoot, debugPort,
+      );
+      return;
+    }
+
     // For Gradle, check if sub-batching is needed to avoid command-line-too-long
     if (buildTool === 'gradle') {
       await this.runGradleBatchWithSplitting(
@@ -421,6 +491,21 @@ export class TestRunCoordinator {
         run, token, start, projectRoot, debugPort,
       );
     }
+  }
+
+  private shouldRunWholeProjectTask(request: vscode.TestRunRequest): boolean {
+    if (request.exclude && request.exclude.length > 0) {
+      return false;
+    }
+
+    if (!request.include || request.include.length === 0) {
+      return true;
+    }
+
+    return request.include.every(item => {
+      const type = this.treeManager.testData.get(item)?.type;
+      return type === 'project' || type === 'subproject';
+    });
   }
 
   /**
