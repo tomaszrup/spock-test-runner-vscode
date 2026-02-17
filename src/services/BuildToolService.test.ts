@@ -668,9 +668,27 @@ describe('BuildToolService', () => {
     });
 
     it('should handle strings with double quotes', () => {
-      const result = shellEscapeFn('say "hello"');
-      // The raw unescaped double-quote should not appear
-      expect(result).toContain('\\"');
+      const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      // On Windows: double quotes are backslash-escaped inside double-quoted string
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      try {
+        const winResult = shellEscapeFn('say "hello"');
+        expect(winResult).toContain('\\"');
+      } finally {
+        if (origPlatform) {
+          Object.defineProperty(process, 'platform', origPlatform);
+        }
+      }
+      // On Unix: string is single-quoted, double quotes pass through unchanged
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      try {
+        const nixResult = shellEscapeFn('say "hello"');
+        expect(nixResult).toBe("'say \"hello\"'");
+      } finally {
+        if (origPlatform) {
+          Object.defineProperty(process, 'platform', origPlatform);
+        }
+      }
     });
 
     it('should handle percent signs on Windows', () => {
