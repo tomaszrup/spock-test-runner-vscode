@@ -207,8 +207,10 @@ export function extractErrorForTest(output: string, className: string, testName:
       } else if (/^\S+\s+>\s+.+\s+STANDARD_(ERROR|OUT)\s*$/i.test(trimmed)) {
         capturingStandardOutput = false;
       } else {
-        standardOutputBlock.push(trimmed);
-        seenStandardOutputContent = true;
+        if (!isGradleTaskNoiseLine(trimmed)) {
+          standardOutputBlock.push(trimmed);
+          seenStandardOutputContent = true;
+        }
         continue;
       }
     }
@@ -243,8 +245,8 @@ export function extractErrorForTest(output: string, className: string, testName:
 
     if (!causeLine && trimmed.length > 0) {
       const looksLikeCause =
-        /(AssertionError|ComparisonFailure|Condition not satisfied|Assertion failed|Exception|Error:|expected:\s*<|Actual|Expected)/i.test(trimmed)
-        && !/^\s*>\s*Task\s+/i.test(trimmed)
+        /(AssertionError|ComparisonFailure|Condition not satisfied|Assertion failed|Exception|Error:|expected:\s*<|Actual|Expected|Compilation failed|^>\s*Task\s+.+\s+FAILED\s*$)/i.test(trimmed)
+        && !isGradleTaskNoiseLine(trimmed)
         && !/^\s*\[INFO\]/i.test(trimmed)
         && !/^\s*\[DEBUG\]/i.test(trimmed);
       if (looksLikeCause) {
@@ -286,6 +288,14 @@ function escapeRegExp(value: string): string {
 
 function isGradleInternalStackLine(line: string): boolean {
   return /\borg\.gradle\.|\bworker\.org\.gradle\./.test(line);
+}
+
+function isGradleTaskNoiseLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!/^>\s*Task\s+/i.test(trimmed)) {
+    return false;
+  }
+  return !/\bFAILED\s*$/i.test(trimmed);
 }
 
 /**

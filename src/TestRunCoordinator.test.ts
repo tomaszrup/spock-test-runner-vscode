@@ -1170,5 +1170,219 @@ describe('TestRunCoordinator', () => {
       expect(passedSpy).toHaveBeenCalledWith(test1, expect.any(Number));
       expect(erroredSpy).not.toHaveBeenCalled();
     });
+
+    it('should map 10-test synthetic gradle output with 50 pre-build task lines to correct per-test errors', async () => {
+      const { extractErrorForTest, hasErrorForTest } = await import('./services/SpockErrorParser');
+      const actualParser = await vi.importActual<typeof import('./services/SpockErrorParser')>('./services/SpockErrorParser');
+      vi.mocked(extractErrorForTest).mockImplementation(actualParser.extractErrorForTest);
+      vi.mocked(hasErrorForTest).mockImplementation(actualParser.hasErrorForTest);
+
+      const run = createMockRun();
+      const failedSpy = run.failed;
+      const passedSpy = run.passed;
+      const erroredSpy = run.errored;
+      controller.createTestRun = vi.fn(() => run);
+
+      const className = 'ComprehensiveSpec';
+      const testNames = [
+        't01 condition failure',
+        't02 passes',
+        't03 illegal state',
+        't04 passes',
+        't05 assertion failed error',
+        't06 passes',
+        't07 missing property',
+        't08 passes',
+        't09 timeout assertion',
+        't10 passes',
+      ];
+
+      const tests = testNames.map((name, index) => {
+        const item = controller.createTestItem(`t${index + 1}`, name, vscode.Uri.file('/workspace/project/spec.groovy'));
+        treeManager.testData.set(item, { type: 'test', className, testName: name });
+        return item;
+      });
+
+      const preBuildTaskLines = Array.from({ length: 50 }, (_, index) =>
+        `> Task :sub${index + 1}:build`,
+      );
+
+      const syntheticOutput = [
+        ...preBuildTaskLines,
+        `${className} > t01 condition failure FAILED`,
+        'Condition not satisfied:',
+        '  actual == expected',
+        '  |      |  |',
+        '  4      |  5',
+        '         false',
+        '    at com.example.ComprehensiveSpec.t01 condition failure(ComprehensiveSpec.groovy:11)',
+
+        `${className} > t02 passes PASSED`,
+
+        `${className} > t03 illegal state FAILED`,
+        'Caused by: java.lang.IllegalStateException: db offline',
+        '    at com.example.Service.connect(Service.java:42)',
+
+        `${className} > t04 passes PASSED`,
+
+        `${className} > t05 assertion failed error FAILED`,
+        `${className} > t05 assertion failed error STANDARD_ERROR`,
+        '    org.opentest4j.AssertionFailedError: expected: <abc> but was: <xyz>',
+        '    at com.example.ComprehensiveSpec.t05 assertion failed error(ComprehensiveSpec.groovy:58)',
+
+        `${className} > t06 passes PASSED`,
+
+        `${className} > t07 missing property FAILED`,
+        'groovy.lang.MissingPropertyException: No such property: value for class: com.example.Payload',
+        '    at com.example.ComprehensiveSpec.t07 missing property(ComprehensiveSpec.groovy:77)',
+
+        `${className} > t08 passes PASSED`,
+
+        `${className} > t09 timeout assertion FAILED`,
+        'java.lang.AssertionError: expected completion under 100ms but was 501ms',
+        '    at com.example.ComprehensiveSpec.t09 timeout assertion(ComprehensiveSpec.groovy:99)',
+
+        `${className} > t10 passes PASSED`,
+        '10 tests completed, 5 failed',
+      ].join('\n');
+
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: syntheticOutput,
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest(tests);
+      await coordinator.runHandler(false, request, token);
+
+      expect(failedSpy).toHaveBeenCalledTimes(5);
+      expect(passedSpy).toHaveBeenCalledTimes(5);
+      expect(erroredSpy).not.toHaveBeenCalled();
+
+      const failedMessagesByTest = new Map(
+        failedSpy.mock.calls.map((call: any[]) => [call[0], call[1]?.message as string]),
+      );
+
+      expect(failedMessagesByTest.get(tests[0])).toBe([
+        'Condition not satisfied:',
+        '  actual == expected',
+        '  |      |  |',
+        '  4      |  5',
+        '         false',
+        '',
+        'at com.example.ComprehensiveSpec.t01 condition failure(ComprehensiveSpec.groovy:11)',
+      ].join('\n'));
+
+      expect(failedMessagesByTest.get(tests[2])).toBe([
+        'Caused by: java.lang.IllegalStateException: db offline',
+        'at com.example.Service.connect(Service.java:42)',
+      ].join('\n'));
+
+      expect(failedMessagesByTest.get(tests[4])).toBe([
+        'org.opentest4j.AssertionFailedError: expected: <abc> but was: <xyz>',
+        'at com.example.ComprehensiveSpec.t05 assertion failed error(ComprehensiveSpec.groovy:58)',
+      ].join('\n'));
+
+      expect(failedMessagesByTest.get(tests[6])).toBe([
+        'groovy.lang.MissingPropertyException: No such property: value for class: com.example.Payload',
+        '',
+        'at com.example.ComprehensiveSpec.t07 missing property(ComprehensiveSpec.groovy:77)',
+      ].join('\n'));
+
+      expect(failedMessagesByTest.get(tests[8])).toBe([
+        'java.lang.AssertionError: expected completion under 100ms but was 501ms',
+        '',
+        'at com.example.ComprehensiveSpec.t09 timeout assertion(ComprehensiveSpec.groovy:99)',
+      ].join('\n'));
+
+      for (const call of failedSpy.mock.calls) {
+        const msg = call[1]?.message as string;
+        expect(msg).not.toContain('> Task :sub1:build');
+        expect(msg).not.toContain('> Task :sub50:build');
+      }
+
+      vi.mocked(extractErrorForTest).mockImplementation(() => 'Test failed');
+      vi.mocked(hasErrorForTest).mockImplementation(() => false);
+    });
+
+    it('should mark selected tests as errored for synthetic gradle build failure output', async () => {
+      const run = createMockRun();
+      const erroredSpy = run.errored;
+      const failedSpy = run.failed;
+      const passedSpy = run.passed;
+      controller.createTestRun = vi.fn(() => run);
+
+      const className = 'BuildFailureSpec';
+      const testNames = [
+        'compilation blocked one',
+        'compilation blocked two',
+        'compilation blocked three',
+      ];
+
+      const tests = testNames.map((name, index) => {
+        const item = controller.createTestItem(`bf-${index + 1}`, name, vscode.Uri.file('/workspace/project/spec.groovy'));
+        treeManager.testData.set(item, { type: 'test', className, testName: name });
+        return item;
+      });
+
+      const preBuildTaskLines = Array.from({ length: 20 }, (_, index) =>
+        `> Task :module${index + 1}:assemble`,
+      );
+
+      const syntheticBuildFailureOutput = [
+        ...preBuildTaskLines,
+        '> Task :compileTestGroovy FAILED',
+        'Startup failed:',
+        "src/test/groovy/com/example/BuildFailureSpec.groovy: 23: unable to resolve class MissingCollaborator",
+        ' @ line 23, column 17.',
+        '                   MissingCollaborator collaborator = new MissingCollaborator()',
+        '                   ^',
+        '',
+        '1 error',
+        '',
+        'FAILURE: Build failed with an exception.',
+        '',
+        '* What went wrong:',
+        "Execution failed for task ':compileTestGroovy'.",
+        '> Compilation failed; see the compiler error output for details.',
+        '',
+        '* Try:',
+        '> Run with --stacktrace option to get the stack trace.',
+        '',
+        'BUILD FAILED in 4s',
+      ].join('\n');
+
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: syntheticBuildFailureOutput,
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest(tests);
+      await coordinator.runHandler(false, request, token);
+
+      expect(erroredSpy).toHaveBeenCalledTimes(3);
+      expect(failedSpy).not.toHaveBeenCalled();
+      expect(passedSpy).not.toHaveBeenCalled();
+
+      const expectedErroredMessage = [
+        ...preBuildTaskLines,
+        'Startup failed:',
+        'src/test/groovy/com/example/BuildFailureSpec.groovy: 23: unable to resolve class MissingCollaborator',
+        '@ line 23, column 17.',
+        'MissingCollaborator collaborator = new MissingCollaborator()',
+        '^',
+      ].join('\n');
+
+      const erroredMessagesByTest = new Map(
+        erroredSpy.mock.calls.map((call: any[]) => [call[0], call[1]?.message as string]),
+      );
+
+      for (const testItem of tests) {
+        expect(erroredMessagesByTest.get(testItem)).toBe(expectedErroredMessage);
+      }
+    });
   });
 });

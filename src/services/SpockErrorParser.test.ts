@@ -170,6 +170,37 @@ describe('SpockErrorParser', () => {
       expect(result).not.toContain('Failed to map supported failure');
       expect(result).not.toContain('OpenTestAssertionFailureMapper');
     });
+
+    it('should filter Gradle > Task noise inside STANDARD_OUT blocks', () => {
+      const output = [
+        'com.example.CalculatorSpec > should add FAILED',
+        'com.example.CalculatorSpec > should add STANDARD_OUT',
+        '    > Task :sub1:compileJava UP-TO-DATE',
+        '    > Task :sub2:processResources NO-SOURCE',
+        '    Condition not satisfied:',
+        '      result == 3',
+        '      |      |',
+        '      0      false',
+        'com.example.CalculatorSpec > should subtract PASSED',
+      ].join('\n');
+
+      const result = extractErrorForTest(output, 'com.example.CalculatorSpec', 'should add');
+      expect(result).toContain('Condition not satisfied');
+      expect(result).not.toContain('> Task :sub1:compileJava UP-TO-DATE');
+      expect(result).not.toContain('> Task :sub2:processResources NO-SOURCE');
+    });
+
+    it('should keep Gradle > Task FAILED lines as meaningful diagnostics', () => {
+      const output = [
+        'com.example.CalculatorSpec > should add FAILED',
+        'com.example.CalculatorSpec > should add STANDARD_ERROR',
+        '    > Task :compileTestGroovy FAILED',
+        '    Compilation failed; see the compiler error output for details.',
+      ].join('\n');
+
+      const result = extractErrorForTest(output, 'com.example.CalculatorSpec', 'should add');
+      expect(result).toContain('> Task :compileTestGroovy FAILED');
+    });
   });
 
   // ── hasErrorForClass ───────────────────────────────────────────────
