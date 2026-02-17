@@ -4,7 +4,7 @@
 
 A VS Code extension that provides comprehensive test support for the [Spock testing framework](https://spockframework.org/) in Java/Groovy projects. It integrates with VS Code's Test API to offer seamless test discovery, execution, and debugging capabilities for Spock tests.
 
-**Version**: 0.0.17  
+**Version**: 0.1.0
 **Author**: Tomasz Rup  
 **Original Author**: [Lukas Zaruba](https://github.com/LZaruba)
 
