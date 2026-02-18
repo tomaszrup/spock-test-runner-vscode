@@ -104,25 +104,9 @@ This project uses **maven-surefire-plugin** to execute Spock tests. Two configur
    </includes>
    ```
 
-2. **`pom`-packaged parent modules** — The root `pom.xml` uses `<packaging>pom</packaging>`. Maven's `pom` lifecycle does **not** bind `surefire:test` automatically, so an explicit `<execution>` block is required for tests to run:
-   ```xml
-   <plugin>
-       <groupId>org.apache.maven.plugins</groupId>
-       <artifactId>maven-surefire-plugin</artifactId>
-       <executions>
-           <execution>
-               <id>default-test</id>
-               <phase>test</phase>
-               <goals>
-                   <goal>test</goal>
-               </goals>
-           </execution>
-       </executions>
-   </plugin>
-   ```
-   Without this, `mvn test` compiles the tests but never executes them, reporting `BUILD SUCCESS` with zero tests run.
+2. **`pom`-packaged parent modules** — The root `pom.xml` uses `<packaging>pom</packaging>`. Maven's `pom` lifecycle does **not** bind `surefire:test` automatically, but the extension handles this automatically for VS Code test runs by selecting an explicit Surefire execution path.
 
-   The `sub-module/` uses standard `jar` packaging and inherits surefire normally — no extra `<execution>` is needed there.
+   If you run Maven manually via CLI with plain `mvn test`, you may still need explicit Surefire execution binding in your own POM configuration, depending on module packaging.
 
 ### Build
 ```bash

@@ -443,6 +443,41 @@ export class BuildToolService {
   }
 
   /**
+   * Resolve Maven packaging for the target module.
+   * Defaults to {@code jar} when packaging is absent or unreadable.
+   */
+  private static async getMavenPackaging(
+    workspacePath?: string,
+    mavenModuleName?: string,
+    logger?: vscode.OutputChannel,
+  ): Promise<string> {
+    if (!workspacePath) {
+      return 'jar';
+    }
+
+    const modulePath = mavenModuleName
+      ? path.join(workspacePath, ...mavenModuleName.split('/'))
+      : workspacePath;
+    const pomPath = path.join(modulePath, 'pom.xml');
+
+    try {
+      if (!await fileExists(pomPath)) {
+        return 'jar';
+      }
+
+      const pomContent = await fsp.readFile(pomPath, 'utf8');
+      const withoutParent = pomContent.replace(/<parent>[\s\S]*?<\/parent>/g, '');
+      const packagingMatch = withoutParent.match(/<packaging>\s*([^<\s]+)\s*<\/packaging>/i);
+      return packagingMatch?.[1]?.trim().toLowerCase() || 'jar';
+    } catch (error) {
+      if (logger) {
+        logger.appendLine(`BuildToolService: Could not read Maven packaging from ${pomPath}; defaulting to jar`);
+      }
+      return 'jar';
+    }
+  }
+
+  /**
    * Check if a Maven wrapper exists at the given path or in any parent directory
    * up to (and including) the workspace root.
    */
@@ -692,12 +727,14 @@ export class BuildToolService {
   ): Promise<string[]> {
     const sanitized = sanitizeTestFilter(testName, logger);
     const mvnCommand = await this.getMavenCommand(workspacePath);
+    const packaging = await this.getMavenPackaging(workspacePath, mavenModuleName, logger);
+    const pomPackaging = packaging === 'pom';
 
     // Convert "ClassName.methodName" to Surefire filter "ClassName#methodName"
     const surefireFilter = this.toSurefireFilter(sanitized);
 
-    const args = [mvnCommand, 'test', `-Dtest=${shellEscape(surefireFilter)}`, '-Dsurefire.useFile=true',
-      '-Dsurefire.failIfNoSpecifiedTests=false'];
+    const args = [mvnCommand, ...(pomPackaging ? ['test-compile', 'surefire:test'] : ['test']),
+      `-Dtest=${shellEscape(surefireFilter)}`, '-Dsurefire.useFile=true', '-Dsurefire.failIfNoSpecifiedTests=false'];
 
     // For multi-module: run only in the target module
     if (mavenModuleName) {
@@ -710,7 +747,7 @@ export class BuildToolService {
     }
 
     if (logger) {
-      logger.appendLine(`BuildToolService: Using Maven Surefire to execute test`);
+      logger.appendLine(`BuildToolService: Using Maven ${pomPackaging ? 'test-compile + surefire:test' : 'test phase'} to execute test`);
     }
 
     const extraArgs = validateExtraArgs(ConfigurationService.getConfig().additionalMavenArgs, 'maven', logger);
@@ -732,13 +769,15 @@ export class BuildToolService {
     debugPort?: number
   ): Promise<string[]> {
     const mvnCommand = await this.getMavenCommand(workspacePath);
+    const packaging = await this.getMavenPackaging(workspacePath, mavenModuleName, logger);
+    const pomPackaging = packaging === 'pom';
 
     // Group filters by class for Surefire: "Class1#m1+m2,Class2#m3"
     const sanitizedFilters = testFilters.map(f => sanitizeTestFilter(f, logger));
     const surefireFilter = this.buildSurefireBatchFilter(sanitizedFilters);
 
-    const args = [mvnCommand, 'test', `-Dtest=${shellEscape(surefireFilter)}`, '-Dsurefire.useFile=true',
-      '-Dsurefire.failIfNoSpecifiedTests=false'];
+    const args = [mvnCommand, ...(pomPackaging ? ['test-compile', 'surefire:test'] : ['test']),
+      `-Dtest=${shellEscape(surefireFilter)}`, '-Dsurefire.useFile=true', '-Dsurefire.failIfNoSpecifiedTests=false'];
 
     if (mavenModuleName) {
       args.push('-pl', mavenModuleName, '-am');
@@ -756,7 +795,7 @@ export class BuildToolService {
     }
 
     if (logger) {
-      logger.appendLine(`BuildToolService: Maven batch execution with ${testFilters.length} test filter(s)${coverage ? ' (with coverage)' : ''}`);
+      logger.appendLine(`BuildToolService: Maven batch execution via ${pomPackaging ? 'test-compile + surefire:test' : 'test phase'} with ${testFilters.length} test filter(s)${coverage ? ' (with coverage)' : ''}`);
     }
 
     const extraArgs = validateExtraArgs(ConfigurationService.getConfig().additionalMavenArgs, 'maven', logger);

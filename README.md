@@ -51,21 +51,6 @@ The extension uses Maven Surefire to run Spock tests. Your project must have **m
 </plugin>
 ```
 
-> **Important for `pom`-packaged parent projects:** Maven's `pom` lifecycle does not bind `surefire:test` by default. If you have tests in a `pom`-packaged module, you must add an explicit `<execution>` block that binds surefire to the `test` phase:
->
-> ```xml
-> <executions>
->     <execution>
->         <id>default-test</id>
->         <phase>test</phase>
->         <goals>
->             <goal>test</goal>
->         </goals>
->     </execution>
-> </executions>
-> ```
->
-> Without this, tests will compile but never execute, and Maven will report `BUILD SUCCESS` with zero tests run.
 
 ### Recommended VS Code Extensions
 

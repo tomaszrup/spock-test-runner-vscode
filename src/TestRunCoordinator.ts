@@ -467,7 +467,8 @@ export class TestRunCoordinator {
 
     // Fast path for whole-project Gradle runs: invoke project test task without --tests filters.
     if (runWholeProjectTask && buildTool === 'gradle') {
-      this.logger.appendLine('TestRunCoordinator: Whole-project Gradle run detected — executing plain project test task');
+      this.logger.appendLine('TestRunCoordinator: Execution mode = whole-project task (Gradle, no --tests filters)');
+      this.logger.appendLine(`TestRunCoordinator: Execution target = ${subprojectPrefix ? `${subprojectPrefix}:test` : 'test'} (root=${rootProject}, group=${projectRoot})`);
       await this.runSingleBatch(
         [], testLookup, tests,
         debug, rootProject, subprojectPrefix, coverage, buildTool,
@@ -475,6 +476,9 @@ export class TestRunCoordinator {
       );
       return;
     }
+
+    this.logger.appendLine('TestRunCoordinator: Execution mode = filtered batch (explicit test filters)');
+    this.logger.appendLine(`TestRunCoordinator: Execution target = ${subprojectPrefix ? `${subprojectPrefix}:test` : 'test'} (root=${rootProject}, group=${projectRoot})`);
 
     // For Gradle, check if sub-batching is needed to avoid command-line-too-long
     if (buildTool === 'gradle') {
@@ -543,6 +547,7 @@ export class TestRunCoordinator {
       this.logger.appendLine(
         `TestRunCoordinator: Command line too long — splitting ${coalesced.length} filters into ${batches.length} sub-batches`,
       );
+      this.logger.appendLine('TestRunCoordinator: Execution mode detail = filtered batch (split into sub-batches)');
     }
 
     let combinedResult = { success: true, output: '' };

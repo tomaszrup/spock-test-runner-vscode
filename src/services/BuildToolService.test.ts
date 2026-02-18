@@ -578,6 +578,7 @@ describe('BuildToolService', () => {
         if (s.endsWith('mvnw') || s.endsWith('mvnw.cmd')) return;
         throw new Error('ENOENT');
       });
+      mockedFs.promises.readFile.mockResolvedValue('<project><packaging>jar</packaging></project>' as any);
     });
 
     it('should build Maven test command', async () => {
@@ -591,6 +592,16 @@ describe('BuildToolService', () => {
       const args = await BuildToolService.buildCommandArgs('MySpec.myTest', true, '/project', undefined, undefined, 'maven');
       expect(args.some(a => a.includes('maven.surefire.debug'))).toBe(true);
     });
+
+    it('should use test-compile and surefire:test for pom packaging', async () => {
+      mockedFs.promises.readFile.mockResolvedValue('<project><packaging>pom</packaging></project>' as any);
+
+      const args = await BuildToolService.buildCommandArgs('MySpec.myTest', false, '/project', undefined, undefined, 'maven');
+
+      expect(args).toContain('test-compile');
+      expect(args).toContain('surefire:test');
+      expect(args.filter(a => a === 'test')).toHaveLength(0);
+    });
   });
 
   describe('buildBatchCommandArgs with Maven', () => {
@@ -601,6 +612,7 @@ describe('BuildToolService', () => {
         if (s.endsWith('mvnw') || s.endsWith('mvnw.cmd')) return;
         throw new Error('ENOENT');
       });
+      mockedFs.promises.readFile.mockResolvedValue('<project><packaging>jar</packaging></project>' as any);
     });
 
     it('should build Maven batch command with grouped filters', async () => {
@@ -643,6 +655,24 @@ describe('BuildToolService', () => {
       );
       expect(args).toContain('-pl');
       expect(args).toContain('sub-module');
+    });
+
+    it('should use test-compile and surefire:test for pom packaging', async () => {
+      mockedFs.promises.readFile.mockResolvedValue('<project><packaging>pom</packaging></project>' as any);
+
+      const args = await BuildToolService.buildBatchCommandArgs(
+        ['TestA.m1'],
+        false,
+        '/project',
+        undefined,
+        undefined,
+        false,
+        'maven'
+      );
+
+      expect(args).toContain('test-compile');
+      expect(args).toContain('surefire:test');
+      expect(args.filter(a => a === 'test')).toHaveLength(0);
     });
   });
 
