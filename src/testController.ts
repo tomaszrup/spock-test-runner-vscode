@@ -35,7 +35,7 @@ export class SpockTestController {
     const testExecutionService = new TestExecutionService(this.logger);
     const testResultParser = new TestResultParser(this.logger);
     const coverageService = new CoverageService(this.logger);
-    const buildToolService = new BuildToolService();
+    const buildToolService = new BuildToolService(context.extensionPath);
     const configurationService = new ConfigurationService();
     const testDiscoveryService = new TestDiscoveryService();
 

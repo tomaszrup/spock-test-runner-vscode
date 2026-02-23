@@ -150,6 +150,19 @@ export interface IBuildToolService {
 
 export class BuildToolService {
   /**
+   * Root path of the extension installation, set once during activation.
+   * Used to resolve bundled resource files (init scripts, etc.) in a way
+   * that works for local, Remote-SSH, WSL, and Codespaces hosts.
+   */
+  private static _extensionPath: string | undefined;
+
+  constructor(extensionPath?: string) {
+    if (extensionPath) {
+      BuildToolService._extensionPath = extensionPath;
+    }
+  }
+
+  /**
    * Detect the build tool at a given directory path.
    * Supports Gradle (build.gradle / build.gradle.kts) and Maven (pom.xml).
    * Gradle is checked first for backward compatibility.
@@ -1026,8 +1039,16 @@ export class BuildToolService {
 
   // ── Shared / init scripts ──────────────────────────────────────────
 
+  private static getExtensionRoot(): string {
+    if (this._extensionPath) {
+      return this._extensionPath;
+    }
+    // Fallback for tests or when extensionPath was not set
+    return path.join(__dirname, '..', '..');
+  }
+
   private static async getInitScriptPath(): Promise<string> {
-    const initScriptPath = path.join(__dirname, '..', '..', 'resources', 'force-tests.init.gradle');
+    const initScriptPath = path.join(this.getExtensionRoot(), 'resources', 'force-tests.init.gradle');
     
     if (!await fileExists(initScriptPath)) {
       throw new Error(`Init script not found at: ${initScriptPath}`);
@@ -1040,7 +1061,7 @@ export class BuildToolService {
    * Path to the coverage init script that applies JaCoCo and forces tests.
    */
   static async getCoverageInitScriptPath(): Promise<string> {
-    const initScriptPath = path.join(__dirname, '..', '..', 'resources', 'coverage.init.gradle');
+    const initScriptPath = path.join(this.getExtensionRoot(), 'resources', 'coverage.init.gradle');
     if (!await fileExists(initScriptPath)) {
       throw new Error(`Coverage init script not found at: ${initScriptPath}`);
     }
