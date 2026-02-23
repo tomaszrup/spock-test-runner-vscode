@@ -686,10 +686,14 @@ describe('BuildToolService', () => {
       shellEscapeFn = mod.shellEscape;
     });
 
-    it('should wrap a simple string', () => {
+    it('should wrap a simple string on Windows or return as-is on Unix', () => {
       const result = shellEscapeFn('hello');
-      // On any platform it should be quoted
-      expect(result.startsWith('"') || result.startsWith("'")).toBe(true);
+      if (process.platform === 'win32') {
+        expect(result.startsWith('"')).toBe(true);
+      } else {
+        // Unix: spawn uses shell: false, no quoting needed
+        expect(result).toBe('hello');
+      }
     });
 
     it('should handle strings with spaces', () => {
@@ -709,11 +713,11 @@ describe('BuildToolService', () => {
           Object.defineProperty(process, 'platform', origPlatform);
         }
       }
-      // On Unix: string is single-quoted, double quotes pass through unchanged
+      // On Unix: spawn uses shell: false, so no quoting is applied
       Object.defineProperty(process, 'platform', { value: 'linux' });
       try {
         const nixResult = shellEscapeFn('say "hello"');
-        expect(nixResult).toBe("'say \"hello\"'");
+        expect(nixResult).toBe('say "hello"');
       } finally {
         if (origPlatform) {
           Object.defineProperty(process, 'platform', origPlatform);
@@ -809,12 +813,12 @@ describe('BuildToolService', () => {
       }
     });
 
-    it('should escape single quotes on Unix', () => {
+    it('should return string as-is on Unix (spawn uses shell: false)', () => {
       const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
       Object.defineProperty(process, 'platform', { value: 'linux' });
       try {
         const result = shellEscapeFn("it's a test");
-        expect(result).toBe("'it'\\''s a test'");
+        expect(result).toBe("it's a test");
       } finally {
         if (origPlatform) {
           Object.defineProperty(process, 'platform', origPlatform);

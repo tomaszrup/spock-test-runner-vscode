@@ -44,8 +44,10 @@ export function shellEscape(s: string): string {
     safe = safe.replace(/!/g, '^^!');
     return `"${safe}"`;
   }
-  // Unix: single-quote, escaping embedded single quotes
-  return "'" + s.replace(/'/g, "'\\''") + "'";
+  // Unix: spawn() is called with shell: false, so arguments are passed
+  // directly to the process via execve — no shell interpretation occurs.
+  // Adding quotes would embed literal quote characters in the argument.
+  return s;
 }
 
 /**
