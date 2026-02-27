@@ -44,7 +44,7 @@ export class DebugService {
   }
 
   async startDebugSession(options: DebugSessionOptions): Promise<void> {
-    const cfg = ConfigurationService.getConfig();
+    const cfg = ConfigurationService.getConfig(vscode.Uri.file(options.workspacePath));
     const connectionTimeoutMs = cfg.debugConnectionTimeout * 1000;
     const maxRetries = cfg.debugRetries;
 
@@ -140,6 +140,7 @@ export class DebugService {
 
   private async attemptDebugConnection(options: DebugSessionOptions): Promise<void> {
     const sourcePaths = this.getSourcePaths(options.workspacePath);
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(options.workspacePath));
 
     this.logger.appendLine(`DebugService: Debug source paths:`);
     sourcePaths.forEach((sourcePath, index) => {
@@ -165,7 +166,7 @@ export class DebugService {
       includeTest: true
     };
 
-    const success = await vscode.debug.startDebugging(undefined, debugConfig);
+    const success = await vscode.debug.startDebugging(workspaceFolder, debugConfig);
     if (!success) {
       throw new Error('Failed to start debug session');
     }

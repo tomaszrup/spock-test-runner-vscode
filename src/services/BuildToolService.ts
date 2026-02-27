@@ -1,10 +1,39 @@
-import * as path from 'path';
-import * as fs from 'fs';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import { BuildTool } from '../types';
 import { ConfigurationService } from './ConfigurationService';
 
 const fsp = fs.promises;
+const XML_PARENT_BLOCK_REGEX = /<parent>[\s\S]*?<\/parent>/g;
+
+function logArgRejection(logger: vscode.OutputChannel | undefined, message: string, value: string): void {
+  if (logger) {
+    logger.appendLine(`BuildToolService: WARNING — ${message}: ${JSON.stringify(value)}`);
+  }
+}
+
+function hasUnsafeControlChars(value: string): boolean {
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 32 && code !== 9) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function stripControlChars(value: string, preserveTab: boolean): string {
+  let result = '';
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    const isControl = code < 32;
+    if (!isControl || (preserveTab && code === 9)) {
+      result += ch;
+    }
+  }
+  return result;
+}
 
 /**
  * Async helper replacing fs.existsSync — resolves to true when the path is
@@ -34,14 +63,12 @@ async function fileExists(p: string): Promise<boolean> {
 export function shellEscape(s: string): string {
   if (process.platform === 'win32') {
     // Strip characters that cannot safely travel through cmd.exe
-    let safe = s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
-    // Remove \r and \n to prevent command splitting
-    safe = safe.replace(/[\r\n]/g, '');
+    let safe = stripControlChars(s, true).replaceAll('\r', '').replaceAll('\n', '');
     // Escape double quotes for the C runtime argv parser
-    safe = safe.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    safe = safe.replaceAll('\\', String.raw`\\`).replaceAll('"', String.raw`\"`);
     // Escape cmd.exe env-var expansion and delayed-expansion
-    safe = safe.replace(/%/g, '%%');
-    safe = safe.replace(/!/g, '^^!');
+    safe = safe.replaceAll('%', '%%');
+    safe = safe.replaceAll('!', '^^!');
     return `"${safe}"`;
   }
   // Unix: spawn() is called with shell: false, so arguments are passed
@@ -55,10 +82,7 @@ export function shellEscape(s: string): string {
  * Strips null bytes and ASCII control characters (defence-in-depth).
  */
 export function sanitizeTestFilter(name: string, logger?: vscode.OutputChannel): string {
-  const cleaned = name.replace(/[\x00-\x1f]/g, (ch) => {
-    if (ch === ' ' || ch === '\t') { return ch; } // keep normal whitespace
-    return '';
-  });
+  const cleaned = stripControlChars(name, true);
   if (cleaned !== name && logger) {
     logger.appendLine(`BuildToolService: WARNING — control characters stripped from test filter: ${JSON.stringify(name)}`);
   }
@@ -99,31 +123,22 @@ export function validateExtraArgs(
   const safe: string[] = [];
   let skipNext = false;
 
-  for (let i = 0; i < args.length; i++) {
+  for (const arg of args) {
     if (skipNext) {
-      // This is the value following a blocked flag — skip it too
-      if (logger) {
-        logger.appendLine(`BuildToolService: WARNING — rejected additional arg (value of blocked flag): ${JSON.stringify(args[i])}`);
-      }
+      logArgRejection(logger, 'rejected additional arg (value of blocked flag)', arg);
       skipNext = false;
       continue;
     }
 
-    const arg = args[i];
-
     // Reject args with control characters / newlines
-    if (/[\x00-\x08\x0b\x0c\x0e-\x1f\r\n]/.test(arg)) {
-      if (logger) {
-        logger.appendLine(`BuildToolService: WARNING — rejected additional arg containing control characters: ${JSON.stringify(arg)}`);
-      }
+    if (hasUnsafeControlChars(arg)) {
+      logArgRejection(logger, 'rejected additional arg containing control characters', arg);
       continue;
     }
 
     // Check blocked patterns
     if (blocked.some(re => re.test(arg))) {
-      if (logger) {
-        logger.appendLine(`BuildToolService: WARNING — rejected blocked additional arg: ${JSON.stringify(arg)}`);
-      }
+      logArgRejection(logger, 'rejected blocked additional arg', arg);
       // If this flag takes a value (next arg), skip that too
       skipNext = true;
       continue;
@@ -146,8 +161,15 @@ export interface IBuildToolService {
   getSubprojectPrefix(rootProject: string, subprojectPath: string): string;
   getMavenModuleName(rootProject: string, submodulePath: string): string;
   buildCommandArgs(testName: string, debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, buildTool?: BuildTool, debugPort?: number): Promise<string[]>;
-  buildBatchCommandArgs(testFilters: string[], debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, coverage?: boolean, buildTool?: BuildTool, debugPort?: number, classTestCounts?: Map<string, number>): Promise<string[]>;
+  buildBatchCommandArgs(testFilters: string[], debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, options?: BatchCommandOptions): Promise<string[]>;
   getTestResultsDir(projectRoot: string, buildTool: BuildTool): string;
+}
+
+export interface BatchCommandOptions {
+  coverage?: boolean;
+  buildTool?: BuildTool;
+  debugPort?: number;
+  classTestCounts?: Map<string, number>;
 }
 
 export class BuildToolService {
@@ -481,12 +503,12 @@ export class BuildToolService {
       }
 
       const pomContent = await fsp.readFile(pomPath, 'utf8');
-      const withoutParent = pomContent.replace(/<parent>[\s\S]*?<\/parent>/g, '');
-      const packagingMatch = withoutParent.match(/<packaging>\s*([^<\s]+)\s*<\/packaging>/i);
+      const withoutParent = pomContent.replaceAll(XML_PARENT_BLOCK_REGEX, '');
+      const packagingMatch = /<packaging>\s*([^<\s]+)\s*<\/packaging>/i.exec(withoutParent);
       return packagingMatch?.[1]?.trim().toLowerCase() || 'jar';
     } catch (error) {
       if (logger) {
-        logger.appendLine(`BuildToolService: Could not read Maven packaging from ${pomPath}; defaulting to jar`);
+        logger.appendLine(`BuildToolService: Could not read Maven packaging from ${pomPath}; defaulting to jar. Error: ${String(error)}`);
       }
       return 'jar';
     }
@@ -525,60 +547,49 @@ export class BuildToolService {
 
   static async getProjectName(workspacePath: string): Promise<string> {
     // Try settings.gradle / settings.gradle.kts first (canonical location for rootProject.name)
-    try {
-      const settingsPath = path.join(workspacePath, 'settings.gradle');
-      const settingsKtsPath = path.join(workspacePath, 'settings.gradle.kts');
-      const actualSettingsPath = await fileExists(settingsPath) ? settingsPath : settingsKtsPath;
-
-      if (await fileExists(actualSettingsPath)) {
-        const settingsContent = await fsp.readFile(actualSettingsPath, 'utf8');
-        const nameMatch = settingsContent.match(/rootProject\.name\s*=\s*['"]([^'"]+)['"]/);
-        if (nameMatch) {
-          return nameMatch[1];
-        }
+    const settingsPath = path.join(workspacePath, 'settings.gradle');
+    const settingsKtsPath = path.join(workspacePath, 'settings.gradle.kts');
+    const actualSettingsPath = await fileExists(settingsPath) ? settingsPath : settingsKtsPath;
+    const settingsContent = await this.readFileIfExists(actualSettingsPath);
+    if (settingsContent) {
+      const nameMatch = /rootProject\.name\s*=\s*['"]([^'"]+)['"]/.exec(settingsContent);
+      if (nameMatch?.[1]) {
+        return nameMatch[1];
       }
-    } catch (error) {
-      // Fallback below
     }
 
     // Try build.gradle / build.gradle.kts
-    try {
-      const gradlePath = path.join(workspacePath, 'build.gradle');
-      const ktsPath = path.join(workspacePath, 'build.gradle.kts');
-      const actualPath = await fileExists(gradlePath) ? gradlePath : ktsPath;
-      
-      if (await fileExists(actualPath)) {
-          const gradleContent = await fsp.readFile(actualPath, 'utf8');
-          const nameMatch = gradleContent.match(/rootProject\.name\s*=\s*['"]([^'"]+)['"]/) || 
-          gradleContent.match(/name\s*=\s*['"]([^'"]+)['"]/);
-          if (nameMatch) {
-              return nameMatch[1];
-            }
-        }
-    } catch (error) {
-      // Fallback below
+    const gradlePath = path.join(workspacePath, 'build.gradle');
+    const ktsPath = path.join(workspacePath, 'build.gradle.kts');
+    const actualPath = await fileExists(gradlePath) ? gradlePath : ktsPath;
+    const gradleContent = await this.readFileIfExists(actualPath);
+    if (gradleContent) {
+      const rootProjectName = /rootProject\.name\s*=\s*['"]([^'"]+)['"]/.exec(gradleContent);
+      if (rootProjectName?.[1]) {
+        return rootProjectName[1];
+      }
+      const gradleName = /name\s*=\s*['"]([^'"]+)['"]/.exec(gradleContent);
+      if (gradleName?.[1]) {
+        return gradleName[1];
+      }
     }
     
     // Try Maven
-    try {
-      const pomPath = path.join(workspacePath, 'pom.xml');
-      if (await fileExists(pomPath)) {
-        const pomContent = await fsp.readFile(pomPath, 'utf8');
-        // Strip the <parent>…</parent> block so we don't accidentally
-        // match <name> or <artifactId> from the parent declaration.
-        const withoutParent = pomContent.replace(/<parent>[\s\S]*?<\/parent>/g, '');
-        const nameMatch = withoutParent.match(/<name>([^<]+)<\/name>/);
-        if (nameMatch) {
-          return nameMatch[1].trim();
-        }
-        // Fallback to artifactId (also outside <parent>)
-        const artifactMatch = withoutParent.match(/<artifactId>([^<]+)<\/artifactId>/);
-        if (artifactMatch) {
-          return artifactMatch[1].trim();
-        }
+    const pomPath = path.join(workspacePath, 'pom.xml');
+    const pomContent = await this.readFileIfExists(pomPath);
+    if (pomContent) {
+      // Strip the <parent>…</parent> block so we don't accidentally
+      // match <name> or <artifactId> from the parent declaration.
+      const withoutParent = pomContent.replaceAll(XML_PARENT_BLOCK_REGEX, '');
+      const nameMatch = /<name>([^<]+)<\/name>/.exec(withoutParent);
+      if (nameMatch?.[1]) {
+        return nameMatch[1].trim();
       }
-    } catch (error) {
-      // Fallback below
+      // Fallback to artifactId (also outside <parent>)
+      const artifactMatch = /<artifactId>([^<]+)<\/artifactId>/.exec(withoutParent);
+      if (artifactMatch?.[1]) {
+        return artifactMatch[1].trim();
+      }
     }
 
     return path.basename(workspacePath);
@@ -616,11 +627,9 @@ export class BuildToolService {
     workspacePath?: string,
     logger?: vscode.OutputChannel,
     subprojectPrefix?: string,
-    coverage: boolean = false,
-    buildTool?: BuildTool,
-    debugPort?: number,
-    classTestCounts?: Map<string, number>
+    options: BatchCommandOptions = {}
   ): Promise<string[]> {
+    const { coverage = false, buildTool, debugPort, classTestCounts } = options;
     const detected = buildTool || (workspacePath ? await this.detectBuildTool(workspacePath) : null);
     if (!detected && logger) {
       logger.appendLine('BuildToolService: WARNING — neither Gradle nor Maven detected, defaulting to Gradle');
@@ -633,7 +642,7 @@ export class BuildToolService {
     if (detectedTool === 'maven') {
       return this.buildMavenBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage, debugPort);
     }
-    return this.buildGradleBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage, debugPort, classTestCounts);
+    return this.buildGradleBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, { coverage, debugPort, classTestCounts });
   }
 
   // ── Gradle command building ────────────────────────────────────────
@@ -648,9 +657,13 @@ export class BuildToolService {
   ): Promise<string[]> {
     const sanitized = sanitizeTestFilter(testName, logger);
     const escapedTestName = shellEscape(sanitized);
+    const configScope = workspacePath ? vscode.Uri.file(workspacePath) : undefined;
+    const cfg = ConfigurationService.getConfig(configScope);
     
     let gradleCommand: string;
-    const wsRoot = workspacePath ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(workspacePath))?.uri.fsPath : undefined;
+    const wsRoot = workspacePath
+      ? (vscode.workspace.getWorkspaceFolder(vscode.Uri.file(workspacePath))?.uri.fsPath ?? workspacePath)
+      : undefined;
     if (workspacePath && await this.hasGradleWrapper(workspacePath, wsRoot)) {
       gradleCommand = process.platform === 'win32' ? 'gradlew.bat' : './gradlew';
     } else {
@@ -666,10 +679,10 @@ export class BuildToolService {
       logger.appendLine(`BuildToolService: Using Gradle init script to force test execution (--init-script)`);
     }
     
-    const extraArgs = validateExtraArgs(ConfigurationService.getConfig().additionalGradleArgs, 'gradle', logger);
+    const extraArgs = validateExtraArgs(cfg.additionalGradleArgs, 'gradle', logger);
 
     if (debug) {
-      const port = debugPort ?? ConfigurationService.getConfig().debugPort;
+      const port = debugPort ?? cfg.debugPort;
       const jvmDebugArg = `-Dorg.gradle.jvmargs=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${port}`;
       return [...baseArgs, '--debug-jvm', jvmDebugArg, ...initScriptArgs, ...extraArgs];
     } else {
@@ -683,12 +696,15 @@ export class BuildToolService {
     workspacePath?: string,
     logger?: vscode.OutputChannel,
     subprojectPrefix?: string,
-    coverage: boolean = false,
-    debugPort?: number,
-    classTestCounts?: Map<string, number>
+    options: Omit<BatchCommandOptions, 'buildTool'> = {}
   ): Promise<string[]> {
+    const { coverage = false, debugPort, classTestCounts } = options;
+    const configScope = workspacePath ? vscode.Uri.file(workspacePath) : undefined;
+    const cfg = ConfigurationService.getConfig(configScope);
     let gradleCommand: string;
-    const wsRoot = workspacePath ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(workspacePath))?.uri.fsPath : undefined;
+    const wsRoot = workspacePath
+      ? (vscode.workspace.getWorkspaceFolder(vscode.Uri.file(workspacePath))?.uri.fsPath ?? workspacePath)
+      : undefined;
     if (workspacePath && await this.hasGradleWrapper(workspacePath, wsRoot)) {
       gradleCommand = process.platform === 'win32' ? 'gradlew.bat' : './gradlew';
     } else {
@@ -712,13 +728,11 @@ export class BuildToolService {
     }
 
     if (debug) {
-      const cfg = ConfigurationService.getConfig();
       const port = debugPort ?? cfg.debugPort;
-      args.push('--debug-jvm');
-      args.push(`-Dorg.gradle.jvmargs=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${port}`);
+      args.push('--debug-jvm', `-Dorg.gradle.jvmargs=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${port}`);
     }
 
-    const extraArgs = validateExtraArgs(ConfigurationService.getConfig().additionalGradleArgs, 'gradle', logger);
+    const extraArgs = validateExtraArgs(cfg.additionalGradleArgs, 'gradle', logger);
     args.push(...extraArgs);
 
     return args;
@@ -741,6 +755,8 @@ export class BuildToolService {
     debugPort?: number
   ): Promise<string[]> {
     const sanitized = sanitizeTestFilter(testName, logger);
+    const configScope = workspacePath ? vscode.Uri.file(workspacePath) : undefined;
+    const cfg = ConfigurationService.getConfig(configScope);
     const mvnCommand = await this.getMavenCommand(workspacePath);
     const packaging = await this.getMavenPackaging(workspacePath, mavenModuleName, logger);
     const pomPackaging = packaging === 'pom';
@@ -757,7 +773,7 @@ export class BuildToolService {
     }
 
     if (debug) {
-      const port = debugPort ?? ConfigurationService.getConfig().debugPort;
+      const port = debugPort ?? cfg.debugPort;
       args.push(`-Dmaven.surefire.debug=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${port}`);
     }
 
@@ -765,7 +781,7 @@ export class BuildToolService {
       logger.appendLine(`BuildToolService: Using Maven ${pomPackaging ? 'test-compile + surefire:test' : 'test phase'} to execute test`);
     }
 
-    const extraArgs = validateExtraArgs(ConfigurationService.getConfig().additionalMavenArgs, 'maven', logger);
+    const extraArgs = validateExtraArgs(cfg.additionalMavenArgs, 'maven', logger);
     args.push(...extraArgs);
 
     return args;
@@ -783,6 +799,8 @@ export class BuildToolService {
     coverage: boolean = false,
     debugPort?: number
   ): Promise<string[]> {
+    const configScope = workspacePath ? vscode.Uri.file(workspacePath) : undefined;
+    const cfg = ConfigurationService.getConfig(configScope);
     const mvnCommand = await this.getMavenCommand(workspacePath);
     const packaging = await this.getMavenPackaging(workspacePath, mavenModuleName, logger);
     const pomPackaging = packaging === 'pom';
@@ -805,7 +823,7 @@ export class BuildToolService {
     }
 
     if (debug) {
-      const port = debugPort ?? ConfigurationService.getConfig().debugPort;
+      const port = debugPort ?? cfg.debugPort;
       args.push(`-Dmaven.surefire.debug=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${port}`);
     }
 
@@ -813,7 +831,7 @@ export class BuildToolService {
       logger.appendLine(`BuildToolService: Maven batch execution via ${pomPackaging ? 'test-compile + surefire:test' : 'test phase'} with ${testFilters.length} test filter(s)${coverage ? ' (with coverage)' : ''}`);
     }
 
-    const extraArgs = validateExtraArgs(ConfigurationService.getConfig().additionalMavenArgs, 'maven', logger);
+    const extraArgs = validateExtraArgs(cfg.additionalMavenArgs, 'maven', logger);
     args.push(...extraArgs);
 
     return args;
@@ -824,7 +842,9 @@ export class BuildToolService {
    */
   private static async getMavenCommand(workspacePath?: string): Promise<string> {
     const isWindows = process.platform === 'win32';
-    const wsRoot = workspacePath ? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(workspacePath))?.uri.fsPath : undefined;
+    const wsRoot = workspacePath
+      ? (vscode.workspace.getWorkspaceFolder(vscode.Uri.file(workspacePath))?.uri.fsPath ?? workspacePath)
+      : undefined;
     if (workspacePath && await this.hasMavenWrapper(workspacePath, wsRoot)) {
       return isWindows ? 'mvnw.cmd' : './mvnw';
     }
@@ -868,9 +888,7 @@ export class BuildToolService {
         classMap.get(className)!.push(this.escapeMethodForSurefire(methodName));
       } else {
         // No dot — treat as class-only filter
-        if (!classMap.has(filter)) {
-          classMap.set(filter, []);
-        }
+        classMap.set(filter, classMap.get(filter) ?? []);
       }
     }
 
@@ -901,16 +919,16 @@ export class BuildToolService {
   static escapeMethodForSurefire(methodName: string): string {
     // Step 1: Replace Surefire structural separators with unique placeholders
     let result = methodName
-      .replace(/\+/g, '\x00P')
-      .replace(/,/g, '\x00C');
+      .replaceAll('+', '__SUREFIRE_PLUS__')
+      .replaceAll(',', '__SUREFIRE_COMMA__');
 
     // Step 2: Escape regex-special characters (NOT + and , — already replaced)
-    result = result.replace(/[.*?()\[\]{}^$|\\]/g, '\\$&');
+    result = result.replaceAll(/[.*?()[\]{}^$|\\]/g, String.raw`\$&`);
 
     // Step 3: Replace placeholders with '.' (regex any-char)
     result = result
-      .replace(/\x00P/g, '.')
-      .replace(/\x00C/g, '.');
+      .replaceAll('__SUREFIRE_PLUS__', '.')
+      .replaceAll('__SUREFIRE_COMMA__', '.');
 
     return result;
   }
@@ -1049,6 +1067,17 @@ export class BuildToolService {
     return path.join(__dirname, '..', '..');
   }
 
+  private static async readFileIfExists(filePath: string): Promise<string | undefined> {
+    try {
+      if (!await fileExists(filePath)) {
+        return undefined;
+      }
+      return await fsp.readFile(filePath, 'utf8');
+    } catch {
+      return undefined;
+    }
+  }
+
   private static async getInitScriptPath(): Promise<string> {
     const initScriptPath = path.join(this.getExtensionRoot(), 'resources', 'force-tests.init.gradle');
     
@@ -1105,8 +1134,8 @@ export class BuildToolService {
   async buildCommandArgs(testName: string, debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, buildTool?: BuildTool, debugPort?: number): Promise<string[]> {
     return BuildToolService.buildCommandArgs(testName, debug, workspacePath, logger, subprojectPrefix, buildTool, debugPort);
   }
-  async buildBatchCommandArgs(testFilters: string[], debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, coverage: boolean = false, buildTool?: BuildTool, debugPort?: number, classTestCounts?: Map<string, number>): Promise<string[]> {
-    return BuildToolService.buildBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage, buildTool, debugPort, classTestCounts);
+  async buildBatchCommandArgs(testFilters: string[], debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, options: BatchCommandOptions = {}): Promise<string[]> {
+    return BuildToolService.buildBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, options);
   }
   getTestResultsDir(projectRoot: string, buildTool: BuildTool): string {
     return BuildToolService.getTestResultsDir(projectRoot, buildTool);

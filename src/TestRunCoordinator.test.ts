@@ -445,7 +445,7 @@ describe('TestRunCoordinator', () => {
         { test: test2, data: { type: 'test' as const, className: 'Spec', testName: 'test two' } },
       ];
 
-      await coordinator.runBatch('/workspace/project', tests, run as any, false, createCancellationToken());
+      await coordinator.runBatch('/workspace/project', { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 }, tests, run as any, false, createCancellationToken());
 
       expect(run.started).toHaveBeenCalledWith(test1);
       expect(run.started).toHaveBeenCalledWith(test2);
@@ -459,7 +459,7 @@ describe('TestRunCoordinator', () => {
         { test: test1, data: { type: 'test' as const } }, // no className/testName
       ];
 
-      await coordinator.runBatch('/workspace/project', tests, run as any, false, createCancellationToken());
+      await coordinator.runBatch('/workspace/project', { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 }, tests, run as any, false, createCancellationToken());
 
       expect(run.skipped).toHaveBeenCalledWith(test1);
     });
@@ -472,7 +472,7 @@ describe('TestRunCoordinator', () => {
         { test: test1, data: { type: 'test' as const, className: 'Spec', testName: 'data test', isDataDriven: true } },
       ];
 
-      await coordinator.runBatch('/workspace/project', tests, run as any, false, createCancellationToken());
+      await coordinator.runBatch('/workspace/project', { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 }, tests, run as any, false, createCancellationToken());
 
       expect(resultProcessor.handleDataDrivenTestResults).toHaveBeenCalled();
     });
@@ -490,7 +490,15 @@ describe('TestRunCoordinator', () => {
       ]);
       coverageService.parseJacocoReport.mockResolvedValue([{ uri: vscode.Uri.file('/Spec.groovy') }]);
 
-      await coordinator.runBatch('/workspace/project', tests, run as any, false, createCancellationToken(), true);
+      await coordinator.runBatch(
+        '/workspace/project',
+        { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 },
+        tests,
+        run as any,
+        false,
+        createCancellationToken(),
+        { coverage: true },
+      );
 
       expect(coverageService.findAllJacocoXmlReports).toHaveBeenCalled();
       expect(run.addCoverage).toHaveBeenCalled();
@@ -517,7 +525,7 @@ describe('TestRunCoordinator', () => {
         return args;
       });
 
-      await coordinator.runBatch('/workspace/project', tests, run as any, false, createCancellationToken());
+      await coordinator.runBatch('/workspace/project', { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 }, tests, run as any, false, createCancellationToken());
 
       // Should have called executeBatch (at least once — exact count depends on platform limits)
       expect(executionService.executeBatch).toHaveBeenCalled();
@@ -540,7 +548,7 @@ describe('TestRunCoordinator', () => {
         { test: test2, data: { type: 'test' as const, className: 'MySpec', testName: 'test two' } },
       ];
 
-      await coordinator.runBatch('/workspace/project', tests, run as any, false, createCancellationToken());
+      await coordinator.runBatch('/workspace/project', { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 }, tests, run as any, false, createCancellationToken());
 
       // buildBatchCommandArgs should have been called with classTestCounts as the last arg
       const calls = buildToolService.buildBatchCommandArgs.mock.calls;
@@ -914,7 +922,7 @@ describe('TestRunCoordinator', () => {
         output: [
           '> Task :compileTestGroovy FAILED',
           '> Compilation failed; see the compiler error output for details.',
-          'C:\\work\\src\\test\\groovy\\Spec.groovy: 12: unable to resolve class MissingType',
+          String.raw`C:\work\src\test\groovy\Spec.groovy: 12: unable to resolve class MissingType`,
           'BUILD FAILED',
         ].join('\n'),
       });

@@ -31,7 +31,7 @@ export class TestExecutionService {
       this.logger.appendLine(`TestExecutionService: Working directory: ${options.workspacePath}`);
 
       if (options.debug) {
-        const batchCfg = ConfigurationService.getConfig();
+        const batchCfg = ConfigurationService.getConfig(vscode.Uri.file(options.workspacePath));
         let batchDebugPort = options.debugPort;
         if (batchDebugPort === undefined) {
           batchDebugPort = batchCfg.debugPort;
@@ -133,7 +133,7 @@ export class TestExecutionService {
         });
       }
 
-      const batchTimeoutCfg = ConfigurationService.getConfig();
+      const batchTimeoutCfg = ConfigurationService.getConfig(vscode.Uri.file(options.workspacePath));
       const batchTimeoutMs = batchTimeoutCfg.testTimeout * 1000;
       timeoutId = setTimeout(() => {
         if (!childProcess.killed && !processKilled) {

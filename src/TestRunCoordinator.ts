@@ -16,8 +16,61 @@ interface TestLookupEntry {
   data: TestData;
   resolved: boolean;
   /** Status seen during real-time Gradle output parsing (`undefined` if never seen). */
-  seenStatus?: 'PASSED' | 'FAILED' | 'SKIPPED';
+  seenStatus?: TestExecutionStatus;
 }
+
+type TestExecutionStatus = 'PASSED' | 'FAILED' | 'SKIPPED';
+
+interface RunBatchOptions {
+  coverage?: boolean;
+  debugPort?: number;
+  runWholeProjectTask?: boolean;
+}
+
+interface BatchRunContext {
+  testLookup: Map<string, TestLookupEntry>;
+  tests: Array<{test: vscode.TestItem; data: TestData}>;
+  debug: boolean;
+  rootProject: string;
+  subprojectPrefix?: string;
+  coverage: boolean;
+  buildTool: BuildTool;
+  run: vscode.TestRun;
+  token: vscode.CancellationToken;
+  start: number;
+  projectRoot: string;
+  debugPort?: number;
+  classTestCounts?: Map<string, number>;
+}
+
+const BUILD_FAILURE_NOISE_PATTERNS: RegExp[] = [
+  /^>\s*Task\s+:[^\s]+\s+(UP-TO-DATE|NO-SOURCE|FROM-CACHE|SKIPPED|SUCCESS|EXECUTED)\s*$/i,
+  /^>?\s*Compilation failed; see the compiler error output for details\.?$/i,
+  /^\* Try:/i,
+  /^\* Get more help/i,
+  /^>\s*Run with\s+--/i,
+  /^Deprecated Gradle features/i,
+  /^BUILD (FAILED|SUCCESSFUL)\b/i,
+  /^FAILURE:\s+Build failed with an exception\.?\s*$/i,
+  /^>\s*Task\s+:[^\s]+\s+FAILED\s*$/i,
+  /^\d+ actionable task/i,
+  /^BUILD FAILED in\s+/i,
+  /^\[ERROR\]\s+BUILD FAILURE\s*$/i,
+  /^\[ERROR\]\s+COMPILATION ERROR\s*:?\s*$/i,
+  /^\[ERROR\]\s+Tests run:/i,
+  /^\[ERROR\]\s+There are test failures\.?$/i,
+  /^\[ERROR\]\s+Please refer to\s+/i,
+  /^\[ERROR\]\s+Re-run Maven using the\s+/i,
+  /^\[ERROR\]\s+Failed to execute goal\s+/i,
+  /^\[ERROR\]\s+->\s+\[Help /i,
+  /^\[ERROR\]\s+For more information/i,
+  /^\[INFO\]/i,
+  /^\[WARNING\]/i,
+  /^\[DEBUG\]/i,
+  /^\S+\s+>\s+\S+.*\s+(PASSED|SKIPPED)\s*$/i,
+  /Failed to map supported failure/i,
+  /with mapper.*OpenTest/i,
+];
 
 /**
  * Orchestrates test execution: run profiles, batch execution, continuous run,
@@ -30,7 +83,7 @@ export class TestRunCoordinator {
    * survives tree rebuilds (where IDs change).
    */
   public lastFailedTests = new Set<string>();
-  private debugService: DebugService;
+  private readonly debugService: DebugService;
   private notifiedBuildFailure = false;
   private notifiedCoverageMissing = false;
   /** Buffers error lines after a FAILED marker so the failure can be
@@ -43,14 +96,14 @@ export class TestRunCoordinator {
   } | null = null;
 
   constructor(
-    private controller: vscode.TestController,
-    private logger: vscode.LogOutputChannel,
-    private testExecutionService: TestExecutionService,
-    private testResultParser: TestResultParser,
-    private coverageService: CoverageService,
-    private treeManager: TestTreeManager,
-    private resultProcessor: ResultProcessor,
-    private buildToolService: IBuildToolService,
+    private readonly controller: vscode.TestController,
+    private readonly logger: vscode.LogOutputChannel,
+    private readonly testExecutionService: TestExecutionService,
+    private readonly testResultParser: TestResultParser,
+    private readonly coverageService: CoverageService,
+    private readonly treeManager: TestTreeManager,
+    private readonly resultProcessor: ResultProcessor,
+    private readonly buildToolService: IBuildToolService,
   ) {
     this.debugService = new DebugService(logger);
   }
@@ -135,10 +188,9 @@ export class TestRunCoordinator {
     const originalPassed = run.passed.bind(run);
     const originalSkipped = run.skipped.bind(run);
     const originalErrored = run.errored.bind(run);
-    const self = this;
 
     const semanticKey = (test: vscode.TestItem): string | undefined => {
-      const data = self.treeManager.testData.get(test);
+      const data = this.treeManager.testData.get(test);
       const classId = data?.classFqn || data?.className;
       if (classId && data?.testName) {
         return `${classId}#${data.testName}`;
@@ -146,27 +198,27 @@ export class TestRunCoordinator {
       return undefined;
     };
 
-    run.failed = function (test: vscode.TestItem, message: vscode.TestMessage | readonly vscode.TestMessage[], duration?: number) {
+    run.failed = (test: vscode.TestItem, message: vscode.TestMessage | readonly vscode.TestMessage[], duration?: number) => {
       const key = semanticKey(test);
-      if (key) { self.lastFailedTests.add(key); }
+      if (key) { this.lastFailedTests.add(key); }
       return originalFailed(test, message, duration);
     };
 
-    run.passed = function (test: vscode.TestItem, duration?: number) {
+    run.passed = (test: vscode.TestItem, duration?: number) => {
       const key = semanticKey(test);
-      if (key) { self.lastFailedTests.delete(key); }
+      if (key) { this.lastFailedTests.delete(key); }
       return originalPassed(test, duration);
     };
 
-    run.skipped = function (test: vscode.TestItem) {
+    run.skipped = (test: vscode.TestItem) => {
       const key = semanticKey(test);
-      if (key) { self.lastFailedTests.delete(key); }
+      if (key) { this.lastFailedTests.delete(key); }
       return originalSkipped(test);
     };
 
-    run.errored = function (test: vscode.TestItem, message: vscode.TestMessage | readonly vscode.TestMessage[], duration?: number) {
+    run.errored = (test: vscode.TestItem, message: vscode.TestMessage | readonly vscode.TestMessage[], duration?: number) => {
       const key = semanticKey(test);
-      if (key) { self.lastFailedTests.delete(key); }
+      if (key) { this.lastFailedTests.delete(key); }
       return originalErrored(test, message, duration);
     };
 
@@ -256,7 +308,43 @@ export class TestRunCoordinator {
     const runWholeProjectTask = this.shouldRunWholeProjectTask(request);
     this.logger.appendLine(`TestRunCoordinator: whole-project fast path=${runWholeProjectTask}`);
 
-    // Phase 1: Collect all leaf test items
+    const leafTests = await this.collectLeafTests(request, token, trackingRun);
+
+    if (token.isCancellationRequested || leafTests.length === 0) {
+      trackingRun.end();
+      return;
+    }
+
+    const groups = await this.groupLeafTestsByProject(leafTests, trackingRun);
+
+    // Phase 3: Execute each group
+    const totalTests = leafTests.length;
+    const runDebugPort = await this.resolveRunDebugPort(debug);
+    const runCancellationSource = new vscode.CancellationTokenSource();
+    const upstreamCancellation = token.onCancellationRequested(() => runCancellationSource.cancel());
+
+    try {
+      await this.executeGroupsWithProgress(
+        groups,
+        trackingRun,
+        totalTests,
+        debug,
+        runCancellationSource,
+        { coverage, debugPort: runDebugPort, runWholeProjectTask },
+      );
+    } finally {
+      upstreamCancellation.dispose();
+      runCancellationSource.dispose();
+    }
+
+    trackingRun.end();
+  }
+
+  private async collectLeafTests(
+    request: vscode.TestRunRequest,
+    token: vscode.CancellationToken,
+    trackingRun: vscode.TestRun,
+  ): Promise<Array<{test: vscode.TestItem; data: TestData}>> {
     const leafTests: Array<{test: vscode.TestItem; data: TestData}> = [];
     const queue: vscode.TestItem[] = [];
 
@@ -268,7 +356,6 @@ export class TestRunCoordinator {
 
     while (queue.length > 0 && !token.isCancellationRequested) {
       const test = queue.pop()!;
-
       if (request.exclude?.includes(test)) {
         continue;
       }
@@ -278,174 +365,186 @@ export class TestRunCoordinator {
         continue;
       }
 
-      switch (data.type) {
-        case 'project':
-          test.children.forEach(child => queue.push(child));
-          break;
-        case 'subproject':
-          test.children.forEach(child => queue.push(child));
-          break;
-        case 'package':
-          test.children.forEach(child => queue.push(child));
-          break;
-        case 'file':
-          if (test.children.size === 0) {
-            await this.treeManager.discoverTestsInFile(test);
-          }
-          test.children.forEach(child => queue.push(child));
-          break;
-        case 'class':
-          test.children.forEach(child => queue.push(child));
-          break;
-        case 'test':
-          if (test.tags.some(t => t.id === 'runnable')) {
-            leafTests.push({test, data});
-          } else {
-            trackingRun.skipped(test);
-          }
-          break;
-      }
+      await this.collectLeafTestsFromNode(test, data, queue, leafTests, trackingRun);
     }
 
-    if (token.isCancellationRequested || leafTests.length === 0) {
-      trackingRun.end();
+    return leafTests;
+  }
+
+  private async collectLeafTestsFromNode(
+    test: vscode.TestItem,
+    data: TestData,
+    queue: vscode.TestItem[],
+    leafTests: Array<{test: vscode.TestItem; data: TestData}>,
+    trackingRun: vscode.TestRun,
+  ): Promise<void> {
+    if (data.type === 'test') {
+      if (test.tags.some(t => t.id === 'runnable')) {
+        leafTests.push({ test, data });
+      } else {
+        trackingRun.skipped(test);
+      }
       return;
     }
 
-    // Phase 2: Group by project root
-    const groups = new Map<string, Array<{test: vscode.TestItem; data: TestData}>>();
+    if (data.type === 'file' && test.children.size === 0) {
+      await this.treeManager.discoverTestsInFile(test);
+    }
+
+    test.children.forEach(child => queue.push(child));
+  }
+
+  private async groupLeafTestsByProject(
+    leafTests: Array<{test: vscode.TestItem; data: TestData}>,
+    trackingRun: vscode.TestRun,
+  ): Promise<Map<string, { workspaceFolder: vscode.WorkspaceFolder; tests: Array<{test: vscode.TestItem; data: TestData}> }>> {
+    const groups = new Map<string, {
+      workspaceFolder: vscode.WorkspaceFolder;
+      tests: Array<{test: vscode.TestItem; data: TestData}>;
+    }>();
 
     for (const item of leafTests) {
-      if (!item.test.uri) { continue; }
+      if (!item.test.uri) {
+        continue;
+      }
       const workspaceFolder = vscode.workspace.getWorkspaceFolder(item.test.uri);
-      if (!workspaceFolder) { continue; }
+      if (!workspaceFolder) {
+        this.logger.appendLine(`TestRunCoordinator: Unable to resolve workspace folder for test URI: ${item.test.uri.toString()}`);
+        trackingRun.errored(item.test, new vscode.TestMessage('Unable to resolve workspace folder for this test in a multi-root workspace.'));
+        continue;
+      }
 
       const projectRoot = await this.buildToolService.findProjectRoot(item.test.uri.fsPath, workspaceFolder.uri.fsPath);
-      if (!projectRoot) { continue; }
+      if (!projectRoot) {
+        this.logger.appendLine(`TestRunCoordinator: Unable to resolve project root for test file: ${item.test.uri.fsPath}`);
+        trackingRun.errored(item.test, new vscode.TestMessage('Unable to resolve project root for this test.'));
+        continue;
+      }
 
-      if (!groups.has(projectRoot)) { groups.set(projectRoot, []); }
-      groups.get(projectRoot)!.push(item);
+      if (!groups.has(projectRoot)) {
+        groups.set(projectRoot, { workspaceFolder, tests: [] });
+      }
+      groups.get(projectRoot)!.tests.push(item);
     }
 
-    // Phase 3: Execute each group
-    const totalTests = leafTests.length;
-    const runDebugPort = await this.resolveRunDebugPort(debug);
-    const runCancellationSource = new vscode.CancellationTokenSource();
-    const upstreamCancellation = token.onCancellationRequested(() => runCancellationSource.cancel());
+    return groups;
+  }
 
-    try {
-      await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: 'Running Spock Tests',
-          cancellable: true,
-        },
-        async (progress, progressToken) => {
-          let completedTests = 0;
-          let lastReportedPct = 0;
-          const completedTestIds = new Set<string>();
+  private async executeGroupsWithProgress(
+    groups: Map<string, { workspaceFolder: vscode.WorkspaceFolder; tests: Array<{test: vscode.TestItem; data: TestData}> }>,
+    trackingRun: vscode.TestRun,
+    totalTests: number,
+    debug: boolean,
+    runCancellationSource: vscode.CancellationTokenSource,
+    runOptions: RunBatchOptions,
+  ): Promise<void> {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'Running Spock Tests',
+        cancellable: true,
+      },
+      async (progress, progressToken) => {
+        let completedTests = 0;
+        let lastReportedPct = 0;
+        const completedTestIds = new Set<string>();
 
-          const reportCompletedTest = (test: vscode.TestItem) => {
-            if (completedTestIds.has(test.id)) {
-              return;
-            }
-            completedTestIds.add(test.id);
-            completedTests += 1;
-            const pct = Math.round((completedTests / totalTests) * 100);
-            const delta = pct - lastReportedPct;
-            lastReportedPct = pct;
-            progress.report({ message: `${completedTests} / ${totalTests} tests`, increment: Math.max(0, delta) });
-          };
-
-          const originalPassed = trackingRun.passed.bind(trackingRun);
-          const originalFailed = trackingRun.failed.bind(trackingRun);
-          const originalSkipped = trackingRun.skipped.bind(trackingRun);
-          const originalErrored = trackingRun.errored.bind(trackingRun);
-
-          trackingRun.passed = (test: vscode.TestItem, duration?: number) => {
-            reportCompletedTest(test);
-            return originalPassed(test, duration);
-          };
-
-          trackingRun.failed = (
-            test: vscode.TestItem,
-            message: vscode.TestMessage | readonly vscode.TestMessage[],
-            duration?: number,
-          ) => {
-            reportCompletedTest(test);
-            return originalFailed(test, message, duration);
-          };
-
-          trackingRun.skipped = (test: vscode.TestItem) => {
-            reportCompletedTest(test);
-            return originalSkipped(test);
-          };
-
-          trackingRun.errored = (
-            test: vscode.TestItem,
-            message: vscode.TestMessage | readonly vscode.TestMessage[],
-            duration?: number,
-          ) => {
-            reportCompletedTest(test);
-            return originalErrored(test, message, duration);
-          };
-
-          const progressCancellation = progressToken.onCancellationRequested(() => {
-            this.logger.appendLine('TestRunCoordinator: Run cancelled from progress notification');
-            runCancellationSource.cancel();
-          });
-
-          try {
-            progress.report({ message: `0 / ${totalTests} tests`, increment: 0 });
-
-            for (const [projectRoot, tests] of groups) {
-              if (runCancellationSource.token.isCancellationRequested) { break; }
-              await this.runBatch(
-                projectRoot,
-                tests,
-                trackingRun,
-                debug,
-                runCancellationSource.token,
-                coverage,
-                runDebugPort,
-                runWholeProjectTask,
-              );
-            }
-          } finally {
-            trackingRun.passed = originalPassed;
-            trackingRun.failed = originalFailed;
-            trackingRun.skipped = originalSkipped;
-            trackingRun.errored = originalErrored;
-            progressCancellation.dispose();
+        const reportCompletedTest = (test: vscode.TestItem) => {
+          if (completedTestIds.has(test.id)) {
+            return;
           }
-        },
-      );
-    } finally {
-      upstreamCancellation.dispose();
-      runCancellationSource.dispose();
-    }
+          completedTestIds.add(test.id);
+          completedTests += 1;
+          const pct = Math.round((completedTests / totalTests) * 100);
+          const delta = pct - lastReportedPct;
+          lastReportedPct = pct;
+          progress.report({ message: `${completedTests} / ${totalTests} tests`, increment: Math.max(0, delta) });
+        };
 
-    trackingRun.end();
+        const originalPassed = trackingRun.passed.bind(trackingRun);
+        const originalFailed = trackingRun.failed.bind(trackingRun);
+        const originalSkipped = trackingRun.skipped.bind(trackingRun);
+        const originalErrored = trackingRun.errored.bind(trackingRun);
+
+        trackingRun.passed = (test: vscode.TestItem, duration?: number) => {
+          reportCompletedTest(test);
+          return originalPassed(test, duration);
+        };
+        trackingRun.failed = (test: vscode.TestItem, message: vscode.TestMessage | readonly vscode.TestMessage[], duration?: number) => {
+          reportCompletedTest(test);
+          return originalFailed(test, message, duration);
+        };
+        trackingRun.skipped = (test: vscode.TestItem) => {
+          reportCompletedTest(test);
+          return originalSkipped(test);
+        };
+        trackingRun.errored = (test: vscode.TestItem, message: vscode.TestMessage | readonly vscode.TestMessage[], duration?: number) => {
+          reportCompletedTest(test);
+          return originalErrored(test, message, duration);
+        };
+
+        const progressCancellation = progressToken.onCancellationRequested(() => {
+          this.logger.appendLine('TestRunCoordinator: Run cancelled from progress notification');
+          runCancellationSource.cancel();
+        });
+
+        try {
+          progress.report({ message: `0 / ${totalTests} tests`, increment: 0 });
+          for (const [projectRoot, group] of groups) {
+            if (runCancellationSource.token.isCancellationRequested) {
+              break;
+            }
+            await this.runBatch(
+              projectRoot,
+              group.workspaceFolder,
+              group.tests,
+              trackingRun,
+              debug,
+              runCancellationSource.token,
+              runOptions,
+            );
+          }
+        } finally {
+          trackingRun.passed = originalPassed;
+          trackingRun.failed = originalFailed;
+          trackingRun.skipped = originalSkipped;
+          trackingRun.errored = originalErrored;
+          progressCancellation.dispose();
+        }
+      },
+    );
   }
 
   // ── Batch execution ────────────────────────────────────────────────
 
   async runBatch(
     projectRoot: string,
+    workspaceFolder: vscode.WorkspaceFolder,
     tests: Array<{test: vscode.TestItem; data: TestData}>,
     run: vscode.TestRun,
     debug: boolean,
     token: vscode.CancellationToken,
-    coverage: boolean = false,
-    debugPort?: number,
-    runWholeProjectTask: boolean = false,
+    options: RunBatchOptions = {},
   ): Promise<void> {
+    const { coverage = false, debugPort, runWholeProjectTask = false } = options;
     const start = Date.now();
     this.pendingFailure = null;
 
     // Detect build tool & project layout
-    const { buildTool, rootProject, subprojectPrefix } =
-      await this.detectProjectLayout(projectRoot);
+    let buildTool: BuildTool;
+    let rootProject: string;
+    let subprojectPrefix: string | undefined;
+    try {
+      ({ buildTool, rootProject, subprojectPrefix } =
+        await this.detectProjectLayout(projectRoot, workspaceFolder));
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.logger.appendLine(`TestRunCoordinator: Failed to detect project layout for ${projectRoot}: ${msg}`);
+      for (const {test} of tests) {
+        run.errored(test, new vscode.TestMessage(`Failed to detect project layout: ${msg}`));
+      }
+      return;
+    }
 
     for (const {test} of tests) {
       run.started(test);
@@ -468,31 +567,68 @@ export class TestRunCoordinator {
     // Fast path for whole-project Gradle runs: invoke project test task without --tests filters.
     if (runWholeProjectTask && buildTool === 'gradle') {
       this.logger.appendLine('TestRunCoordinator: Execution mode = whole-project task (Gradle, no --tests filters)');
-      this.logger.appendLine(`TestRunCoordinator: Execution target = ${subprojectPrefix ? `${subprojectPrefix}:test` : 'test'} (root=${rootProject}, group=${projectRoot})`);
+      this.logger.appendLine(`TestRunCoordinator: Execution target = ${this.getExecutionTarget(subprojectPrefix)} (root=${rootProject}, group=${projectRoot})`);
       await this.runSingleBatch(
-        [], testLookup, tests,
-        debug, rootProject, subprojectPrefix, coverage, buildTool,
-        run, token, start, projectRoot, debugPort,
+        [],
+        {
+          testLookup,
+          tests,
+          debug,
+          rootProject,
+          subprojectPrefix,
+          coverage,
+          buildTool,
+          run,
+          token,
+          start,
+          projectRoot,
+          debugPort,
+        },
       );
       return;
     }
 
     this.logger.appendLine('TestRunCoordinator: Execution mode = filtered batch (explicit test filters)');
-    this.logger.appendLine(`TestRunCoordinator: Execution target = ${subprojectPrefix ? `${subprojectPrefix}:test` : 'test'} (root=${rootProject}, group=${projectRoot})`);
+    this.logger.appendLine(`TestRunCoordinator: Execution target = ${this.getExecutionTarget(subprojectPrefix)} (root=${rootProject}, group=${projectRoot})`);
 
     // For Gradle, check if sub-batching is needed to avoid command-line-too-long
     if (buildTool === 'gradle') {
       await this.runGradleBatchWithSplitting(
-        testFilters, classTestCounts, testLookup, tests,
-        debug, rootProject, subprojectPrefix, coverage, buildTool,
-        run, token, start, projectRoot, debugPort,
+        testFilters,
+        {
+          testLookup,
+          tests,
+          debug,
+          rootProject,
+          subprojectPrefix,
+          coverage,
+          buildTool,
+          run,
+          token,
+          start,
+          projectRoot,
+          debugPort,
+          classTestCounts,
+        },
       );
     } else {
       // Maven: single batch (uses compact -Dtest= filter)
       await this.runSingleBatch(
-        testFilters, testLookup, tests,
-        debug, rootProject, subprojectPrefix, coverage, buildTool,
-        run, token, start, projectRoot, debugPort,
+        testFilters,
+        {
+          testLookup,
+          tests,
+          debug,
+          rootProject,
+          subprojectPrefix,
+          coverage,
+          buildTool,
+          run,
+          token,
+          start,
+          projectRoot,
+          debugPort,
+        },
       );
     }
   }
@@ -512,29 +648,35 @@ export class TestRunCoordinator {
     });
   }
 
+  private getExecutionTarget(subprojectPrefix?: string): string {
+    return subprojectPrefix ? `${subprojectPrefix}:test` : 'test';
+  }
+
   /**
    * Run Gradle tests, automatically splitting into sub-batches if the
    * estimated command-line length would exceed the OS limit.
    */
   private async runGradleBatchWithSplitting(
     testFilters: string[],
-    classTestCounts: Map<string, number>,
-    testLookup: Map<string, TestLookupEntry>,
-    tests: Array<{test: vscode.TestItem; data: TestData}>,
-    debug: boolean,
-    rootProject: string,
-    subprojectPrefix: string | undefined,
-    coverage: boolean,
-    buildTool: BuildTool,
-    run: vscode.TestRun,
-    token: vscode.CancellationToken,
-    start: number,
-    projectRoot: string,
-    debugPort?: number,
+    context: BatchRunContext,
   ): Promise<void> {
+    const {
+      classTestCounts = new Map<string, number>(),
+      testLookup,
+      debug,
+      rootProject,
+      subprojectPrefix,
+      coverage,
+      buildTool,
+      run,
+      token,
+      start,
+      projectRoot,
+      debugPort,
+    } = context;
     // Build a "probe" command to get the base args (without --tests entries)
     const probeArgs = await this.buildToolService.buildBatchCommandArgs(
-      [], debug, rootProject, this.logger, subprojectPrefix, coverage, buildTool, debugPort,
+      [], debug, rootProject, this.logger, subprojectPrefix, { coverage, buildTool, debugPort },
     );
 
     // Apply wildcard coalescing first (reduces filter count significantly)
@@ -556,28 +698,11 @@ export class TestRunCoordinator {
       if (token.isCancellationRequested) { break; }
 
       const batchFilters = batches[i];
-      const commandArgs = await this.buildToolService.buildBatchCommandArgs(
-        batchFilters, debug, rootProject, this.logger, subprojectPrefix, coverage, buildTool,
-        debugPort, classTestCounts,
-      );
-
-      if (batches.length > 1) {
-        this.logger.appendLine(`TestRunCoordinator: Running sub-batch ${i + 1}/${batches.length} (${batchFilters.length} filters)`);
-      }
-      this.logger.appendLine(`TestRunCoordinator: Running batch of ${tests.length} test(s) in ${projectRoot}${coverage ? ' (with coverage)' : ''}`);
-      this.logger.appendLine(`TestRunCoordinator: Build tool: ${buildTool}, root project: ${rootProject}`);
-      this.logger.appendLine(`TestRunCoordinator: Command: ${commandArgs.join(' ')}`);
-      this.logger.appendLine(`TestRunCoordinator: Test filters: ${JSON.stringify(batchFilters)}`);
-
-      const result = await this.testExecutionService.executeBatch({
-        commandArgs,
-        workspacePath: rootProject,
-        run,
-        testItems: tests.map(t => t.test),
-        debug,
-        debugPort,
-        token,
-        onOutputLine: (line: string) => this.handleRealTimeOutputLine(line, testLookup, run, start),
+      const result = await this.executeGradleSubBatch({
+        batchFilters,
+        batchIndex: i,
+        batchCount: batches.length,
+        context,
       });
 
       // Flush the last pending failure from this sub-batch
@@ -591,33 +716,19 @@ export class TestRunCoordinator {
     }
 
     if (token.isCancellationRequested) {
-      for (const [, entry] of testLookup) {
-        if (!entry.resolved) {
-          run.skipped(entry.test);
-          entry.resolved = true;
-        }
-      }
+      this.markUnresolvedAsSkipped(testLookup, run);
       return;
     }
 
-    const hasBuildFailureSignal = this.hasBuildFailureSignal(combinedResult.output);
-    if (hasBuildFailureSignal) {
-      this.notifyBuildFailure();
-    }
-
-    // Resolve remaining results through multiple strategies
-    await this.resolveDataDrivenResults(
+    await this.finalizeBatchResults(
       testLookup,
       combinedResult,
       run,
       projectRoot,
       buildTool,
       start,
-      hasBuildFailureSignal,
       combinedResult.output,
     );
-    await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start, hasBuildFailureSignal, combinedResult.output);
-    this.resolveFinalFallback(testLookup, combinedResult, run, start, hasBuildFailureSignal);
 
     // Attach coverage data
     if (coverage) {
@@ -625,28 +736,101 @@ export class TestRunCoordinator {
     }
   }
 
+  private async executeGradleSubBatch(args: {
+    batchFilters: string[];
+    batchIndex: number;
+    batchCount: number;
+    context: BatchRunContext;
+  }): Promise<{ success: boolean; output: string }> {
+    const { batchFilters, batchIndex, batchCount, context } = args;
+    const { testLookup, tests, debug, rootProject, subprojectPrefix, coverage, buildTool, run, token, start, projectRoot, debugPort, classTestCounts } = context;
+    const commandArgs = await this.buildToolService.buildBatchCommandArgs(
+      batchFilters,
+      debug,
+      rootProject,
+      this.logger,
+      subprojectPrefix,
+      { coverage, buildTool, debugPort, classTestCounts },
+    );
+
+    if (batchCount > 1) {
+      this.logger.appendLine(`TestRunCoordinator: Running sub-batch ${batchIndex + 1}/${batchCount} (${batchFilters.length} filters)`);
+    }
+    this.logger.appendLine(`TestRunCoordinator: Running batch of ${tests.length} test(s) in ${projectRoot}${coverage ? ' (with coverage)' : ''}`);
+    this.logger.appendLine(`TestRunCoordinator: Build tool: ${buildTool}, root project: ${rootProject}`);
+    this.logger.appendLine(`TestRunCoordinator: Command: ${commandArgs.join(' ')}`);
+    this.logger.appendLine(`TestRunCoordinator: Test filters: ${JSON.stringify(batchFilters)}`);
+
+    return this.testExecutionService.executeBatch({
+      commandArgs,
+      workspacePath: rootProject,
+      run,
+      testItems: tests.map((t) => t.test),
+      debug,
+      debugPort,
+      token,
+      onOutputLine: (line: string) => this.handleRealTimeOutputLine(line, testLookup, run, start),
+    });
+  }
+
+  private markUnresolvedAsSkipped(testLookup: Map<string, TestLookupEntry>, run: vscode.TestRun): void {
+    for (const [, entry] of testLookup) {
+      if (!entry.resolved) {
+        run.skipped(entry.test);
+        entry.resolved = true;
+      }
+    }
+  }
+
+  private async finalizeBatchResults(
+    testLookup: Map<string, TestLookupEntry>,
+    result: { success: boolean; output: string },
+    run: vscode.TestRun,
+    projectRoot: string,
+    buildTool: BuildTool,
+    start: number,
+    output: string,
+  ): Promise<void> {
+    const hasBuildFailureSignal = this.hasBuildFailureSignal(output);
+    if (hasBuildFailureSignal) {
+      this.notifyBuildFailure();
+    }
+
+    await this.resolveDataDrivenResults(
+      testLookup,
+      result,
+      run,
+      { projectRoot, buildTool, start, hasBuildFailureSignal, output },
+    );
+    await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start, hasBuildFailureSignal, output);
+    this.resolveFinalFallback(testLookup, result, run, start, hasBuildFailureSignal);
+  }
+
   /**
    * Run a single batch (no splitting). Used for Maven and small Gradle batches.
    */
   private async runSingleBatch(
     testFilters: string[],
-    testLookup: Map<string, TestLookupEntry>,
-    tests: Array<{test: vscode.TestItem; data: TestData}>,
-    debug: boolean,
-    rootProject: string,
-    subprojectPrefix: string | undefined,
-    coverage: boolean,
-    buildTool: BuildTool,
-    run: vscode.TestRun,
-    token: vscode.CancellationToken,
-    start: number,
-    projectRoot: string,
-    debugPort?: number,
+    context: BatchRunContext,
   ): Promise<void> {
+    const {
+      testLookup,
+      tests,
+      debug,
+      rootProject,
+      subprojectPrefix,
+      coverage,
+      buildTool,
+      run,
+      token,
+      start,
+      projectRoot,
+      debugPort,
+    } = context;
     // Execute tests
     const commandArgs = await this.buildToolService.buildBatchCommandArgs(
-      testFilters, debug, rootProject, this.logger, subprojectPrefix, coverage, buildTool,
-      debugPort,
+      testFilters, debug, rootProject, this.logger, subprojectPrefix,
+      { coverage, buildTool, debugPort },
     );
 
     this.logger.appendLine(`TestRunCoordinator: Running batch of ${tests.length} test(s) in ${projectRoot}${coverage ? ' (with coverage)' : ''}`);
@@ -688,11 +872,7 @@ export class TestRunCoordinator {
       testLookup,
       result,
       run,
-      projectRoot,
-      buildTool,
-      start,
-      hasBuildFailureSignal,
-      result.output,
+      { projectRoot, buildTool, start, hasBuildFailureSignal, output: result.output },
     );
     await this.resolveViaXmlReports(testLookup, run, projectRoot, buildTool, start, hasBuildFailureSignal, result.output);
     this.resolveFinalFallback(testLookup, result, run, start, hasBuildFailureSignal);
@@ -705,18 +885,14 @@ export class TestRunCoordinator {
 
   // ── runBatch helpers ───────────────────────────────────────────────
 
-  private async detectProjectLayout(projectRoot: string): Promise<{
+  private async detectProjectLayout(projectRoot: string, workspaceFolder: vscode.WorkspaceFolder): Promise<{
     buildTool: BuildTool;
     rootProject: string;
     subprojectPrefix: string | undefined;
   }> {
     const buildTool: BuildTool = await this.buildToolService.detectBuildTool(projectRoot) || 'gradle';
 
-    const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(projectRoot))
-      ?? vscode.workspace.workspaceFolders?.[0];
-    const rootProject = workspaceFolder
-      ? await this.buildToolService.findRootProject(projectRoot, workspaceFolder.uri.fsPath)
-      : projectRoot;
+    const rootProject = await this.buildToolService.findRootProject(projectRoot, workspaceFolder.uri.fsPath);
 
     const subprojectPrefix = buildTool === 'gradle'
       ? this.buildToolService.getSubprojectPrefix(rootProject, projectRoot)
@@ -789,9 +965,9 @@ export class TestRunCoordinator {
     run: vscode.TestRun,
     start: number,
   ): void {
-    const gradleMatch = line.match(/^\s*(\S+)\s+>\s+(.+?)\s+(PASSED|FAILED|SKIPPED)\s*$/);
+    const parsed = this.parseGradleResultLine(line);
 
-    if (gradleMatch) {
+    if (parsed) {
       // A new test-result boundary — flush any buffered failure first
       // so the previous failing test is reported with its error details.
       this.flushPendingFailure(run, start);
@@ -805,60 +981,89 @@ export class TestRunCoordinator {
       return;
     }
 
-    const className = gradleMatch[1];
-    const testPart = gradleMatch[2].trim();
-    const status = gradleMatch[3] as 'PASSED' | 'FAILED' | 'SKIPPED';
+    const { className, testPart, status } = parsed;
 
     if (testPart.includes(' > ') || /\[.*#\d+\]$/.test(testPart)) {
       return;
     }
 
-    // Try FQN key first (e.g. "com.example.CalculatorSpec#test name"),
-    // then fall back to simple class name (e.g. "CalculatorSpec#test name")
-    // because the test tree stores simple names while Gradle outputs FQN.
-    const key = `${className}#${testPart}`;
-    let entry = testLookup.get(key);
-    if (!entry) {
-      // Gradle may output FQN while lookup uses simple name, or vice-versa.
-      const simpleName = className.includes('.')
-        ? className.substring(className.lastIndexOf('.') + 1)
-        : undefined;
-      if (simpleName) {
-        entry = testLookup.get(`${simpleName}#${testPart}`);
-      }
+    const entry = this.findLookupEntry(testLookup, className, testPart);
+    this.applyRealTimeStatus(entry, status, run, start, line);
+  }
 
-      // Reverse: Gradle outputs a simple name but lookup keys use FQN.
-      if (!entry && !className.includes('.')) {
-        const suffix = `.${className}#${testPart}`;
-        for (const [lookupKey, lookupEntry] of testLookup) {
-          if (lookupKey.endsWith(suffix)) {
-            entry = lookupEntry;
-            break;
-          }
-        }
+  private parseGradleResultLine(line: string): { className: string; testPart: string; status: TestExecutionStatus } | null {
+    const match = /^\s*(\S+)\s+>\s+(.+?)\s+(PASSED|FAILED|SKIPPED)\s*$/.exec(line);
+    if (!match) {
+      return null;
+    }
+    return {
+      className: match[1],
+      testPart: match[2].trim(),
+      status: match[3] as TestExecutionStatus,
+    };
+  }
+
+  private findLookupEntry(
+    testLookup: Map<string, TestLookupEntry>,
+    className: string,
+    testPart: string,
+  ): TestLookupEntry | undefined {
+    const direct = testLookup.get(`${className}#${testPart}`);
+    if (direct) {
+      return direct;
+    }
+
+    const simpleName = className.includes('.')
+      ? className.substring(className.lastIndexOf('.') + 1)
+      : undefined;
+    if (simpleName) {
+      const simpleMatch = testLookup.get(`${simpleName}#${testPart}`);
+      if (simpleMatch) {
+        return simpleMatch;
       }
     }
 
-    if (entry && !entry.resolved && !entry.data.isDataDriven) {
-      entry.seenStatus = status;
-
-      if (status === 'PASSED') {
-        entry.resolved = true;
-        run.passed(entry.test, Date.now() - start);
-      } else if (status === 'FAILED') {
-        // Buffer this failure — error details follow on subsequent lines.
-        // The failure will be reported (with error details) when the next
-        // test-result boundary arrives or the batch ends.
-        this.pendingFailure = {
-          entry,
-          failedLine: line,
-          errorLines: [],
-        };
-      } else {
-        entry.resolved = true;
-        run.skipped(entry.test);
+    if (className.includes('.')) {
+      return undefined;
+    }
+    const suffix = `.${className}#${testPart}`;
+    for (const [lookupKey, lookupEntry] of testLookup) {
+      if (lookupKey.endsWith(suffix)) {
+        return lookupEntry;
       }
     }
+    return undefined;
+  }
+
+  private applyRealTimeStatus(
+    entry: TestLookupEntry | undefined,
+    status: TestExecutionStatus,
+    run: vscode.TestRun,
+    start: number,
+    line: string,
+  ): void {
+    if (!entry || entry.resolved || entry.data.isDataDriven) {
+      return;
+    }
+
+    entry.seenStatus = status;
+
+    if (status === 'PASSED') {
+      entry.resolved = true;
+      run.passed(entry.test, Date.now() - start);
+      return;
+    }
+    if (status === 'FAILED') {
+      this.pendingFailure = {
+        entry,
+        failedLine: line,
+        errorLines: [],
+      };
+      return;
+    }
+
+    entry.resolved = true;
+    run.skipped(entry.test);
   }
 
   /**
@@ -885,12 +1090,15 @@ export class TestRunCoordinator {
     testLookup: Map<string, TestLookupEntry>,
     result: any,
     run: vscode.TestRun,
-    projectRoot: string,
-    buildTool: BuildTool,
-    start: number,
-    hasBuildFailureSignal: boolean,
-    output: string,
+    options: {
+      projectRoot: string;
+      buildTool: BuildTool;
+      start: number;
+      hasBuildFailureSignal: boolean;
+      output: string;
+    },
   ): Promise<void> {
+    const { projectRoot, buildTool, start, hasBuildFailureSignal, output } = options;
     if (hasBuildFailureSignal) {
       const buildFailureMessage = this.extractBuildFailureMessage(output);
       this.logger.appendLine('TestRunCoordinator: Build failure detected — skipping data-driven parsing and marking unresolved data-driven tests as errored');
@@ -933,37 +1141,60 @@ export class TestRunCoordinator {
       return;
     }
 
+    const unresolvedClasses = this.collectUnresolvedClasses(testLookup);
+
+    for (const className of unresolvedClasses) {
+      const xmlResults = await this.testResultParser.parseClassTestResults(projectRoot, className, buildTool);
+      this.applyXmlResultsForClass(testLookup, xmlResults, className, run, start, output);
+    }
+  }
+
+  private collectUnresolvedClasses(testLookup: Map<string, TestLookupEntry>): Set<string> {
     const unresolvedClasses = new Set<string>();
     for (const [, entry] of testLookup) {
       if (!entry.resolved && entry.data.className) {
         unresolvedClasses.add(entry.data.classFqn || entry.data.className);
       }
     }
+    return unresolvedClasses;
+  }
 
-    for (const className of unresolvedClasses) {
-      const xmlResults = await this.testResultParser.parseClassTestResults(projectRoot, className, buildTool);
-      for (const [, entry] of testLookup) {
-        const entryClass = entry.data.classFqn || entry.data.className;
-        if (!entry.resolved && entryClass === className && entry.data.testName) {
-          const xmlResult = xmlResults.get(entry.data.testName);
-          if (xmlResult) {
-            entry.resolved = true;
-            if (xmlResult.skipped) {
-              run.skipped(entry.test);
-            } else if (xmlResult.success) {
-              run.passed(entry.test, Date.now() - start);
-            } else {
-              const xmlError = xmlResult.errorMessage?.trim();
-              const consoleFallback = extractErrorForTest(output, entryClass, entry.data.testName);
-              const fallbackError = consoleFallback !== 'Test failed'
-                ? consoleFallback
-                : `${entryClass}.${entry.data.testName} FAILED`;
-              const finalError = xmlError && xmlError !== 'Test failed' ? xmlError : fallbackError;
-              run.failed(entry.test, this.resultProcessor.createTestMessage(finalError, xmlResult.diff), Date.now() - start);
-            }
-          }
-        }
+  private applyXmlResultsForClass(
+    testLookup: Map<string, TestLookupEntry>,
+    xmlResults: Map<string, { success: boolean; skipped: boolean; errorMessage?: string; diff?: { expected: string; actual: string } | null }>,
+    className: string,
+    run: vscode.TestRun,
+    start: number,
+    output: string,
+  ): void {
+    for (const [, entry] of testLookup) {
+      const entryClass = entry.data.classFqn || entry.data.className;
+      if (entry.resolved || entryClass !== className || !entry.data.testName) {
+        continue;
       }
+
+      const xmlResult = xmlResults.get(entry.data.testName);
+      if (!xmlResult) {
+        continue;
+      }
+
+      entry.resolved = true;
+      if (xmlResult.skipped) {
+        run.skipped(entry.test);
+        continue;
+      }
+      if (xmlResult.success) {
+        run.passed(entry.test, Date.now() - start);
+        continue;
+      }
+
+      const xmlError = xmlResult.errorMessage?.trim();
+      const consoleFallback = extractErrorForTest(output, entryClass, entry.data.testName);
+      const fallbackError = consoleFallback === 'Test failed'
+        ? `${entryClass}.${entry.data.testName} FAILED`
+        : consoleFallback;
+      const finalError = xmlError && xmlError !== 'Test failed' ? xmlError : fallbackError;
+      run.failed(entry.test, this.resultProcessor.createTestMessage(finalError, xmlResult.diff ?? undefined), Date.now() - start);
     }
   }
 
@@ -1072,48 +1303,8 @@ export class TestRunCoordinator {
     const rawLines = output.split('\n');
     const collected: string[] = [];
 
-    // Noise = boilerplate lines that never carry useful diagnostic info.
-    // Everything else is kept.
-    const isNoiseLine = (line: string): boolean => {
-      const t = line.trim();
-      if (!t) { return true; }
-      // Gradle per-task status lines that are not diagnostics
-      if (/^>\s*Task\s+:[^\s]+\s+(UP-TO-DATE|NO-SOURCE|FROM-CACHE|SKIPPED|SUCCESS|EXECUTED)\s*$/i.test(t)) { return true; }
-      // Generic Gradle hints
-      if (/^>?\s*Compilation failed; see the compiler error output for details\.?$/i.test(t)) { return true; }
-      if (/^\* Try:/i.test(t)) { return true; }
-      if (/^\* Get more help/i.test(t)) { return true; }
-      if (/^>\s*Run with\s+--/i.test(t)) { return true; }
-      if (/^Deprecated Gradle features/i.test(t)) { return true; }
-      if (/^BUILD (FAILED|SUCCESSFUL)\b/i.test(t)) { return true; }
-      if (/^FAILURE:\s+Build failed with an exception\.?\s*$/i.test(t)) { return true; }
-      if (/^>\s*Task\s+:[^\s]+\s+FAILED\s*$/i.test(t)) { return true; }
-      if (/^\d+ actionable task/i.test(t)) { return true; }
-      if (/^BUILD FAILED in\s+/i.test(t)) { return true; }
-      // Maven boilerplate
-      if (/^\[ERROR\]\s+BUILD FAILURE\s*$/i.test(t)) { return true; }
-      if (/^\[ERROR\]\s+COMPILATION ERROR\s*:?\s*$/i.test(t)) { return true; }
-      if (/^\[ERROR\]\s+Tests run:/i.test(t)) { return true; }
-      if (/^\[ERROR\]\s+There are test failures\.?$/i.test(t)) { return true; }
-      if (/^\[ERROR\]\s+Please refer to\s+/i.test(t)) { return true; }
-      if (/^\[ERROR\]\s+Re-run Maven using the\s+/i.test(t)) { return true; }
-      if (/^\[ERROR\]\s+Failed to execute goal\s+/i.test(t)) { return true; }
-      if (/^\[ERROR\]\s+->\s+\[Help /i.test(t)) { return true; }
-      if (/^\[ERROR\]\s+For more information/i.test(t)) { return true; }
-      // Standard log prefixes that are never diagnostics
-      if (/^\[INFO\]/i.test(t)) { return true; }
-      if (/^\[WARNING\]/i.test(t)) { return true; }
-      if (/^\[DEBUG\]/i.test(t)) { return true; }
-      // Test result summary lines
-      if (/^\S+\s+>\s+\S+.*\s+(PASSED|SKIPPED)\s*$/i.test(t)) { return true; }
-      // Gradle 8.x internal mapping diagnostics ("Failed to map supported failure")
-      if (/Failed to map supported failure/i.test(t)) { return true; }
-      if (/with mapper.*OpenTest/i.test(t)) { return true; }
-      return false;
-    };
-
     for (const line of rawLines) {
-      if (!isNoiseLine(line)) {
+      if (!this.isBuildFailureNoiseLine(line)) {
         collected.push(line.trim());
       }
     }
@@ -1127,6 +1318,14 @@ export class TestRunCoordinator {
     }
 
     return 'Build failed (no details available in output).';
+  }
+
+  private isBuildFailureNoiseLine(line: string): boolean {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return true;
+    }
+    return BUILD_FAILURE_NOISE_PATTERNS.some((pattern) => pattern.test(trimmed));
   }
 
   private trimStackTraceDepth(lines: string[], maxPerBlock: number): string[] {

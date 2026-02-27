@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import { SpockTestController } from './testController';
 import { createMockLogger } from './__test_helpers__';
@@ -37,16 +37,16 @@ vi.mock('./services/BuildToolService', () => {
     buildCommandArgs(...args: any[]) { return MockBuildToolService.buildCommandArgs(...args); }
     buildBatchCommandArgs(...args: any[]) { return MockBuildToolService.buildBatchCommandArgs(...args); }
     getTestResultsDir(...args: any[]) { return MockBuildToolService.getTestResultsDir(...args); }
-    static detectBuildTool = vi.fn(() => 'gradle');
-    static findProjectRoot = vi.fn((_fp: string, _ws: string) => '/workspace/project');
-    static findRootProject = vi.fn((_pr: string, _ws: string) => '/workspace/project');
-    static getProjectName = vi.fn(() => 'test-project');
-    static getSubprojectPrefix = vi.fn(() => '');
-    static getMavenModuleName = vi.fn(() => '');
-    static buildCommandArgs = vi.fn(() => ['gradle', 'test']);
-    static buildBatchCommandArgs = vi.fn(() => ['gradle', 'test']);
-    static isGradleProject = vi.fn(() => true);
-    static getTestResultsDir = vi.fn(() => '/workspace/project/build/test-results/test');
+    public static readonly detectBuildTool = vi.fn(() => 'gradle');
+    public static readonly findProjectRoot = vi.fn((_fp: string, _ws: string) => '/workspace/project');
+    public static readonly findRootProject = vi.fn((_pr: string, _ws: string) => '/workspace/project');
+    public static readonly getProjectName = vi.fn(() => 'test-project');
+    public static readonly getSubprojectPrefix = vi.fn(() => '');
+    public static readonly getMavenModuleName = vi.fn(() => '');
+    public static readonly buildCommandArgs = vi.fn(() => ['gradle', 'test']);
+    public static readonly buildBatchCommandArgs = vi.fn(() => ['gradle', 'test']);
+    public static readonly isGradleProject = vi.fn(() => true);
+    public static readonly getTestResultsDir = vi.fn(() => '/workspace/project/build/test-results/test');
   }
   return { BuildToolService: MockBuildToolService };
 });
@@ -57,11 +57,11 @@ vi.mock('./services/TestDiscoveryService', () => {
     resolveAllSpecBaseClasses(...args: any[]) { return MockTestDiscoveryService.resolveAllSpecBaseClasses(...args); }
     hasAnnotation(...args: any[]) { return MockTestDiscoveryService.hasAnnotation(...args); }
     getAnnotationArgument(...args: any[]) { return MockTestDiscoveryService.getAnnotationArgument(...args); }
-    static parseTestsInFile = vi.fn(() => []);
-    static scanClassDeclarations = vi.fn(() => []);
-    static resolveAllSpecBaseClasses = vi.fn(() => new Set<string>());
-    static hasAnnotation = vi.fn((_annotations: any, _name: string) => false);
-    static getAnnotationArgument = vi.fn(() => undefined);
+    public static readonly parseTestsInFile = vi.fn(() => []);
+    public static readonly scanClassDeclarations = vi.fn(() => []);
+    public static readonly resolveAllSpecBaseClasses = vi.fn(() => new Set<string>());
+    public static readonly hasAnnotation = vi.fn((_annotations: any, _name: string) => false);
+    public static readonly getAnnotationArgument = vi.fn(() => undefined);
   }
   return { TestDiscoveryService: MockTestDiscoveryService };
 });

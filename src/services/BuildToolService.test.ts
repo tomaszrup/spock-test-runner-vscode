@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { BuildToolService } from '../services/BuildToolService';
 
 // Mock fs and ConfigurationService
@@ -290,7 +290,7 @@ describe('BuildToolService', () => {
         '/project',
         undefined,
         undefined,
-        true
+        { coverage: true }
       );
       expect(args).toContain('--init-script');
       // The init script path should be the coverage one
@@ -513,12 +513,12 @@ describe('BuildToolService', () => {
 
     it('should escape regex-special characters', () => {
       expect(BuildToolService.escapeMethodForSurefire('test (with parens)'))
-        .toBe('test \\(with parens\\)');
+        .toBe(String.raw`test \(with parens\)`);
     });
 
     it('should handle combination of + and regex chars', () => {
       expect(BuildToolService.escapeMethodForSurefire('calc(#a + #b) == #c'))
-        .toBe('calc\\(#a . #b\\) == #c');
+        .toBe(String.raw`calc\(#a . #b\) == #c`);
     });  });
 
   // ── buildSurefireBatchFilter ──────────────────────────────────────
@@ -622,8 +622,7 @@ describe('BuildToolService', () => {
         '/project',
         undefined,
         undefined,
-        false,
-        'maven'
+        { coverage: false, buildTool: 'maven' }
       );
       expect(args[0]).toMatch(/mvnw/);
       expect(args).toContain('test');
@@ -637,8 +636,7 @@ describe('BuildToolService', () => {
         '/project',
         undefined,
         undefined,
-        true,
-        'maven'
+        { coverage: true, buildTool: 'maven' }
       );
       expect(args.some(a => a.includes('jacoco'))).toBe(true);
     });
@@ -650,8 +648,7 @@ describe('BuildToolService', () => {
         '/project',
         undefined,
         'sub-module',
-        false,
-        'maven'
+        { coverage: false, buildTool: 'maven' }
       );
       expect(args).toContain('-pl');
       expect(args).toContain('sub-module');
@@ -666,8 +663,7 @@ describe('BuildToolService', () => {
         '/project',
         undefined,
         undefined,
-        false,
-        'maven'
+        { coverage: false, buildTool: 'maven' }
       );
 
       expect(args).toContain('test-compile');
@@ -707,7 +703,7 @@ describe('BuildToolService', () => {
       Object.defineProperty(process, 'platform', { value: 'win32' });
       try {
         const winResult = shellEscapeFn('say "hello"');
-        expect(winResult).toContain('\\"');
+        expect(winResult).toContain(String.raw`\"`);
       } finally {
         if (origPlatform) {
           Object.defineProperty(process, 'platform', origPlatform);

@@ -25,7 +25,7 @@ export interface SpockTestRunnerConfig {
  * Interface for configuration access — enables mocking in tests.
  */
 export interface IConfigurationService {
-  getConfig(): SpockTestRunnerConfig;
+  getConfig(scope?: vscode.Uri): SpockTestRunnerConfig;
   onConfigChange(callback: (cfg: SpockTestRunnerConfig) => void): vscode.Disposable;
 }
 
@@ -45,8 +45,8 @@ export class ConfigurationService implements IConfigurationService {
    * Re-call this whenever you need fresh values (e.g. before each test run)
    * to pick up any changes made by the user at runtime.
    */
-  getConfig(): SpockTestRunnerConfig {
-    return ConfigurationService.getConfig();
+  getConfig(scope?: vscode.Uri): SpockTestRunnerConfig {
+    return ConfigurationService.getConfig(scope);
   }
 
   /**
@@ -59,8 +59,8 @@ export class ConfigurationService implements IConfigurationService {
 
   // ── Static convenience methods (backward-compatible) ───────────────
 
-  static getConfig(): SpockTestRunnerConfig {
-    const cfg = vscode.workspace.getConfiguration(SECTION);
+  static getConfig(scope?: vscode.Uri): SpockTestRunnerConfig {
+    const cfg = vscode.workspace.getConfiguration(SECTION, scope);
 
     return {
       debugPort: cfg.get<number>('debugPort', 5005),
