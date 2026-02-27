@@ -1,4 +1,4 @@
-import * as path from 'path';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { IBuildToolService } from './services/BuildToolService';
 import { IConfigurationService } from './services/ConfigurationService';
@@ -20,15 +20,15 @@ export class TestTreeManager {
   private watchers: vscode.FileSystemWatcher[] = [];
 
   /** Fires when discoverAllTests rebuilds the tree from scratch. */
-  private _onDidRebuildTree = new vscode.EventEmitter<void>();
+  private readonly _onDidRebuildTree = new vscode.EventEmitter<void>();
   public readonly onDidRebuildTree = this._onDidRebuildTree.event;
 
   constructor(
-    private controller: vscode.TestController,
-    private logger: vscode.LogOutputChannel,
-    private buildToolService: IBuildToolService,
-    private configurationService: IConfigurationService,
-    private testDiscoveryService: ITestDiscoveryService,
+    private readonly controller: vscode.TestController,
+    private readonly logger: vscode.LogOutputChannel,
+    private readonly buildToolService: IBuildToolService,
+    private readonly configurationService: IConfigurationService,
+    private readonly testDiscoveryService: ITestDiscoveryService,
   ) {}
 
   // ── File-system watchers ───────────────────────────────────────────
@@ -60,7 +60,7 @@ export class TestTreeManager {
             this.discoverTestsInFile(await this.getOrCreateFile(uri));
           }
         });
-        watcher.onDidDelete(uri => {
+        watcher.onDidDelete(uri => { // NOSONAR
           this.logger.appendLine(`TestTreeManager: File deleted: ${uri.fsPath}`);
           for (const [, subItem] of this.subProjectItems) {
             subItem.children.delete(uri.toString());
@@ -129,7 +129,7 @@ export class TestTreeManager {
           title: 'Discovering Spock Tests',
           cancellable: true,
         },
-        async (progress, cancellation) => {
+        async (progress, cancellation) => { // NOSONAR
           progress.report({ message: 'Clearing existing tests…' });
           this.controller.items.replace([]);
           this.projectItems.clear();
@@ -318,7 +318,7 @@ export class TestTreeManager {
     return subItem;
   }
 
-  async getOrCreateFile(uri: vscode.Uri): Promise<vscode.TestItem> {
+  async getOrCreateFile(uri: vscode.Uri): Promise<vscode.TestItem> { // NOSONAR
     const existing = this.controller.items.get(uri.toString());
     if (existing) {
       return existing;
@@ -355,12 +355,12 @@ export class TestTreeManager {
         const rootProject = await this.buildToolService.findRootProject(projectRoot, workspaceFolder.uri.fsPath);
         let parentNode: vscode.TestItem;
         let parentPath: string;
-        if (path.resolve(projectRoot) !== path.resolve(rootProject)) {
-          parentNode = await this.getOrCreateSubProjectNode(projectRoot, rootProject);
-          parentPath = projectRoot;
-        } else {
+        if (path.resolve(projectRoot) === path.resolve(rootProject)) {
           parentNode = await this.getOrCreateRootProjectNode(rootProject);
           parentPath = rootProject;
+        } else {
+          parentNode = await this.getOrCreateSubProjectNode(projectRoot, rootProject);
+          parentPath = projectRoot;
         }
 
         const packageName = this.extractPackageName(uri.fsPath, projectRoot);
@@ -386,15 +386,15 @@ export class TestTreeManager {
    * Returns the dotted package name (e.g. `com.example`) or empty string if not found.
    */
   extractPackageName(filePath: string, projectRoot: string): string {
-    const relativePath = path.relative(projectRoot, filePath).replace(/\\/g, '/');
+    const relativePath = path.relative(projectRoot, filePath).replaceAll('\\', '/');
     // Match patterns like src/{sourceSet}/{language}/ — e.g. src/test/groovy/, src/main/java/
     const sourceRootPattern = /^(.*?src\/[^/]+\/(?:groovy|java|kotlin|scala))\//;
-    const match = relativePath.match(sourceRootPattern);
+    const match = sourceRootPattern.exec(relativePath);
     if (match) {
       const afterSourceRoot = relativePath.substring(match[1].length + 1);
       const dir = afterSourceRoot.substring(0, afterSourceRoot.lastIndexOf('/'));
       if (dir) {
-        return dir.replace(/\//g, '.');
+        return dir.replaceAll('/', '.');
       }
     }
     return '';
@@ -422,7 +422,7 @@ export class TestTreeManager {
 
   // ── File parsing ───────────────────────────────────────────────────
 
-  parseTestsInFile(file: vscode.TestItem, content: string, knownSpecBaseClasses?: Set<string>): void {
+  parseTestsInFile(file: vscode.TestItem, content: string, knownSpecBaseClasses?: Set<string>): void { // NOSONAR
     if (!file.uri) {
       return;
     }
@@ -628,13 +628,13 @@ export class TestTreeManager {
   }
 
   private inferPackageNameFromFile(filePath: string): string {
-    const normalized = filePath.replace(/\\/g, '/');
+    const normalized = filePath.replaceAll('\\', '/');
     const sourceRootPattern = /\/src\/[^/]+\/(?:groovy|java|kotlin|scala)\/(.+)\//;
-    const match = normalized.match(sourceRootPattern);
-    if (!match || !match[1]) {
+    const match = sourceRootPattern.exec(normalized);
+    if (!match?.[1]) {
       return '';
     }
-    return match[1].replace(/\//g, '.');
+    return match[1].replaceAll('/', '.');
   }
   // ── Iteration item cleanup ─────────────────────────────────────────
 

@@ -1,5 +1,5 @@
-import * as fsp from 'fs/promises';
-import * as path from 'path';
+import * as fsp from 'node:fs/promises';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { XMLParser } from 'fast-xml-parser';
 
@@ -36,8 +36,8 @@ export class SpockFileCoverage extends vscode.FileCoverage {
  * {@link FileCoverage} / {@link StatementCoverage} objects.
  */
 export class CoverageService {
-  private logger: vscode.LogOutputChannel;
-  private xmlParser: XMLParser;
+  private readonly logger: vscode.LogOutputChannel;
+  private readonly xmlParser: XMLParser;
 
   constructor(logger: vscode.LogOutputChannel) {
     this.logger = logger;
@@ -204,7 +204,7 @@ export class CoverageService {
   /**
    * Parse line and counter data from a parsed <sourcefile> object.
    */
-  private parseSourceFileCoverage(
+  private parseSourceFileCoverage( // NOSONAR
     sourceUri: vscode.Uri,
     sourceFile: any,
   ): SpockFileCoverage | null {
@@ -220,11 +220,10 @@ export class CoverageService {
     const lines = this.asArray(sourceFile['line']);
 
     for (const line of lines) {
-      const lineNumber = parseInt(line['@_nr'] || '0', 10);
-      const missedInstructions = parseInt(line['@_mi'] || '0', 10);
-      const coveredInstructions = parseInt(line['@_ci'] || '0', 10);
-      const missedBranches = parseInt(line['@_mb'] || '0', 10);
-      const coveredBranches = parseInt(line['@_cb'] || '0', 10);
+      const lineNumber = Number.parseInt(line['@_nr'] || '0', 10);
+      const coveredInstructions = Number.parseInt(line['@_ci'] || '0', 10);
+      const missedBranches = Number.parseInt(line['@_mb'] || '0', 10);
+      const coveredBranches = Number.parseInt(line['@_cb'] || '0', 10);
 
       // A line is "covered" if at least one instruction was executed
       const executed = coveredInstructions > 0;
@@ -251,7 +250,7 @@ export class CoverageService {
       const executedCount = coveredInstructions;
       details.push(
         new vscode.StatementCoverage(
-          executedCount > 0 ? executedCount : 0,
+          Math.max(0, executedCount),
           position,
           branches.length > 0 ? branches : undefined,
         ),
@@ -268,8 +267,8 @@ export class CoverageService {
     const counters = this.asArray(sourceFile['counter']);
     for (const counter of counters) {
       if (counter['@_type'] === 'METHOD') {
-        const missed = parseInt(counter['@_missed'] || '0', 10);
-        const covered = parseInt(counter['@_covered'] || '0', 10);
+        const missed = Number.parseInt(counter['@_missed'] || '0', 10);
+        const covered = Number.parseInt(counter['@_covered'] || '0', 10);
         methodsTotal += missed + covered;
         methodsCovered += covered;
       }

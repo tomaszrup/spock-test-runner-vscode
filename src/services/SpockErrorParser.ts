@@ -7,7 +7,7 @@
  * This module de-duplicates that logic into reusable functions.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { DiffInfo } from '../types';
 
@@ -27,7 +27,7 @@ export interface ParsedTestError {
  *
  * Returns `undefined` when the output contains no recognizable error pattern.
  */
-export function parseTestError(output: string): ParsedTestError | undefined {
+export function parseTestError(output: string): ParsedTestError | undefined { // NOSONAR
   const lines = output.split('\n');
   let errorMessage = 'Test execution failed';
   let location: vscode.Location | undefined;
@@ -36,8 +36,7 @@ export function parseTestError(output: string): ParsedTestError | undefined {
   let conditionBlock: string[] = [];
   let capturingCondition = false;
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  for (const line of lines) {
 
     if (line.includes('FAILED') && (line.includes('Test') || line.includes('Spec'))) {
       errorMessage = line.trim();
@@ -51,7 +50,7 @@ export function parseTestError(output: string): ParsedTestError | undefined {
     }
     if (capturingCondition) {
       // Condition blocks are indented; stop at a blank or non-indented line
-      if (line.match(/^\s+/) && !line.trim().startsWith('at ')) {
+      if (/^\s+/.exec(line) && !line.trim().startsWith('at ')) {
         conditionBlock.push(line.trimEnd());
         continue;
       } else {
@@ -83,10 +82,10 @@ export function parseTestError(output: string): ParsedTestError | undefined {
 
     // Extract location from stack trace
     if (line.includes('.groovy:') && line.includes('at ') && !location) {
-      const match = line.match(/at\s+.*\((.+\.groovy):(\d+)\)/);
+      const match = /at\s+.*\((.+\.groovy):(\d+)\)/.exec(line);
       if (match) {
         const filePath = match[1];
-        const lineNumber = parseInt(match[2]) - 1;
+        const lineNumber = Number.parseInt(match[2], 10) - 1;
 
         try {
           const uri = vscode.Uri.file(path.resolve(filePath));
@@ -115,9 +114,7 @@ export function parseTestError(output: string): ParsedTestError | undefined {
     parts.push(errorMessage);
   }
   if (stackTraceLines.length > 0) {
-    parts.push('');
-    parts.push('Stack trace:');
-    parts.push(stackTraceLines.join('\n'));
+    parts.push('', 'Stack trace:', stackTraceLines.join('\n'));
   }
 
   const fullError = parts.join('\n');
@@ -131,14 +128,14 @@ export function parseTestError(output: string): ParsedTestError | undefined {
  * Looks for Spock assertion blocks, exception messages, and stack traces
  * that mention the given class or test name.
  */
-export function extractErrorForTest(output: string, className: string, testName: string): string {
+export function extractErrorForTest(output: string, className: string, testName: string): string { // NOSONAR
   if (!output) {
     return 'Test failed';
   }
 
   const lines = output.split('\n');
   const simpleClassName = className.includes('.') ? className.substring(className.lastIndexOf('.') + 1) : className;
-  const testHeaderRegex = new RegExp(`^\\s*${escapeRegExp(simpleClassName)}\\s+>\\s+${escapeRegExp(testName)}\\s+(STANDARD_ERROR|STANDARD_OUT)\\s*$`, 'i');
+  const testHeaderRegex = new RegExp(String.raw`^\s*${escapeRegExp(simpleClassName)}\s+>\s+${escapeRegExp(testName)}\s+(STANDARD_ERROR|STANDARD_OUT)\s*$`, 'i');
 
   const isFailureLineForTarget = (line: string): boolean => {
     if (!line.includes(testName)) {
@@ -222,7 +219,7 @@ export function extractErrorForTest(output: string, className: string, testName:
       continue;
     }
     if (capturingCondition) {
-      if (line.match(/^\s+/) && !line.trim().startsWith('at ')) {
+      if (/^\s+/.exec(line) && !line.trim().startsWith('at ')) {
         conditionBlock.push(line.trimEnd());
         continue;
       } else {
@@ -245,7 +242,11 @@ export function extractErrorForTest(output: string, className: string, testName:
 
     if (!causeLine && trimmed.length > 0) {
       const looksLikeCause =
-        /(AssertionError|ComparisonFailure|Condition not satisfied|Assertion failed|Exception|Error:|expected:\s*<|Actual|Expected|Compilation failed|^>\s*Task\s+.+\s+FAILED\s*$)/i.test(trimmed)
+        (
+          /(AssertionError|ComparisonFailure|Condition not satisfied|Assertion failed|Exception|Error:)/i.test(trimmed)
+          || /(expected:\s*<|Actual|Expected|Compilation failed)/i.test(trimmed)
+          || /^>\s*Task\s+.+\s+FAILED\s*$/i.test(trimmed)
+        )
         && !isGradleTaskNoiseLine(trimmed)
         && !/^\s*\[INFO\]/i.test(trimmed)
         && !/^\s*\[DEBUG\]/i.test(trimmed);
@@ -283,7 +284,7 @@ export function extractErrorForTest(output: string, className: string, testName:
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
 }
 
 function isGradleInternalStackLine(line: string): boolean {

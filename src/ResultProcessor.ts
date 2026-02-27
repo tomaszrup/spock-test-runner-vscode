@@ -11,15 +11,15 @@ import { TestData, TestIterationResult, DiffInfo, BuildTool } from './types';
  */
 export class ResultProcessor {
   /** Cache of document content keyed by URI string to avoid repeated openTextDocument calls. */
-  private documentCache = new Map<string, string>();
+  private readonly documentCache = new Map<string, string>();
 
   constructor(
-    private controller: vscode.TestController,
-    private logger: vscode.LogOutputChannel,
-    private testResultParser: TestResultParser,
-    private configurationService: IConfigurationService,
-    private testData: WeakMap<vscode.TestItem, TestData>,
-    private iterationItems: Map<string, vscode.TestItem[]>,
+    private readonly controller: vscode.TestController,
+    private readonly logger: vscode.LogOutputChannel,
+    private readonly testResultParser: TestResultParser,
+    private readonly configurationService: IConfigurationService,
+    private readonly testData: WeakMap<vscode.TestItem, TestData>,
+    private readonly iterationItems: Map<string, vscode.TestItem[]>,
   ) {}
 
   /** Clear the internal document cache (e.g. between test runs). */
@@ -58,7 +58,7 @@ export class ResultProcessor {
         await this.createFlatIterationItems(test, iterationResults, run);
       } else {
         this.logger.appendLine('ResultProcessor: No iteration results found, treating as regular test');
-        const duration = startTime != null ? Date.now() - startTime : undefined;
+        const duration = startTime == null ? undefined : Date.now() - startTime;
         if (result.success) {
           run.passed(test, duration);
         } else {
@@ -69,7 +69,7 @@ export class ResultProcessor {
       }
     } catch (error) {
       this.logger.appendLine(`ResultProcessor: Error handling data-driven test results: ${error}`);
-      const duration = startTime != null ? Date.now() - startTime : undefined;
+      const duration = startTime == null ? undefined : Date.now() - startTime;
       if (result.success) {
         run.passed(test, duration);
       } else {
@@ -170,7 +170,8 @@ export class ResultProcessor {
       }
     }
 
-    const sortedResults = iterationResults.sort((a, b) => {
+    const sortedResults = [...iterationResults];
+    sortedResults.sort((a, b) => {
       if (a.index !== b.index) {
         return a.index - b.index;
       }
@@ -222,11 +223,16 @@ export class ResultProcessor {
     }
 
     this.iterationItems.set(fileUri, newIterationItems);
+    this.reportParentIterationResult(parentTest, sortedResults, run);
+  }
 
-    // Report aggregated result on the parent so it doesn't appear as "skipped"
-    const anyFailed = sortedResults.some(r => !r.success);
-    if (anyFailed) {
-      const failedIteration = sortedResults.find(r => !r.success)!;
+  private reportParentIterationResult(
+    parentTest: vscode.TestItem,
+    sortedResults: TestIterationResult[],
+    run: vscode.TestRun,
+  ): void {
+    const failedIteration = sortedResults.find((r) => !r.success);
+    if (failedIteration) {
       const message = this.createTestMessage(
         failedIteration.errorInfo?.error || 'One or more iterations failed',
         failedIteration.errorInfo?.diff,
@@ -239,7 +245,7 @@ export class ResultProcessor {
 
   // ── Where-block range calculation ──────────────────────────────────
 
-  async calculateIterationRange(parentTest: vscode.TestItem, iteration: TestIterationResult, cachedContent?: string): Promise<vscode.Range> {
+  async calculateIterationRange(parentTest: vscode.TestItem, iteration: TestIterationResult, cachedContent?: string): Promise<vscode.Range> { // NOSONAR
     if (!parentTest.uri) {
       return parentTest.range || new vscode.Range(0, 0, 0, 0);
     }

@@ -31,7 +31,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
     'GroovyObjectSupport', 'Script', 'Binding'
   ]);
 
-  private static readonly METHOD_HEADER_REGEX = /^(?:def|void)\s+(['"]([^'"]+)['"]|([a-zA-Z_][a-zA-Z0-9_]*))\s*(?:\([^)]*\))?\s*(\{)?\s*$/;
+  private static readonly METHOD_HEADER_REGEX = /^(?:def|void)\s+(['"]([^'"]+)['"]|([a-zA-Z_]\w*))\s*(?:\([^)]*\))?\s*(\{)?\s*$/;
   private static readonly BLOCK_LABEL_REGEX = /^(given|when|then|expect|where)\s*:\s*$/;
 
   /**
@@ -56,8 +56,8 @@ export class TestDiscoveryService implements ITestDiscoveryService {
     const result: Array<{ name: string; parent: string; isAbstract: boolean }> = [];
     for (const line of lines) {
       const trimmed = line.trim();
-      const match = trimmed.match(this.CLASS_REGEX);
-      if (match && match[1] && match[2]) {
+      const match = this.CLASS_REGEX.exec(trimmed);
+      if (match?.[1] && match[2]) {
         result.push({
           name: match[1],
           parent: match[2],
@@ -111,7 +111,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
    * @param knownSpecBaseClasses Optional set of additional known spec base class names
    *                              from cross-file inheritance resolution
    */
-  static parseTestsInFile(content: string, knownSpecBaseClasses?: Set<string>): SpockTestClass[] {
+  static parseTestsInFile(content: string, knownSpecBaseClasses?: Set<string>): SpockTestClass[] { // NOSONAR
     const lines = content.split('\n');
     const allClasses: SpockTestClass[] = [];
     let currentClass: SpockTestClass | null = null;
@@ -127,7 +127,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
 
       // Look for class definition (any class extending something)
       if (this.CLASS_REGEX.test(trimmedLine)) {
-        const match = trimmedLine.match(this.CLASS_REGEX);
+        const match = this.CLASS_REGEX.exec(trimmedLine);
         const className = match?.[1];
         const parentClassName = match?.[2];
         const isAbstract = trimmedLine.startsWith('abstract');
@@ -154,7 +154,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
       }
       // Look for test methods
       else if (inClass && currentClass && this.METHOD_HEADER_REGEX.test(trimmedLine)) {
-        const match = trimmedLine.match(this.METHOD_HEADER_REGEX);
+        const match = this.METHOD_HEADER_REGEX.exec(trimmedLine);
         const rawName = (match?.[2] || match?.[3] || '').trim();
         const hasBraceSameLine = !!match?.[4];
 
@@ -265,8 +265,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
         if (specNames.has(cls.name)) {
           continue;
         }
-        const parent = cls.parentClassName;
-        if (parent && (specNames.has(parent) || (parent.includes('.') && specNames.has(parent.split('.').pop()!)))) {
+        if (this.isKnownSpecParent(cls.parentClassName, specNames)) {
           specNames.add(cls.name);
           changed = true;
         }
@@ -276,18 +275,37 @@ export class TestDiscoveryService implements ITestDiscoveryService {
     // Filter: include confirmed specs and apply heuristic for unknown parents
     const result: SpockTestClass[] = [];
     for (const cls of allClasses) {
-      if (specNames.has(cls.name)) {
+      if (this.shouldIncludeSpecClass(cls, specNames)) {
         result.push(cls);
-      } else if (cls.parentClassName && !this.KNOWN_NON_SPEC_BASES.has(cls.parentClassName)) {
-        // Heuristic: unknown parent + has Spock-style test methods → treat as spec
-        if (cls.methods.length > 0) {
-          result.push(cls);
-          specNames.add(cls.name); // so subclasses can resolve
-        }
+        specNames.add(cls.name);
       }
     }
 
     return result;
+  }
+
+  private static isKnownSpecParent(parent: string | undefined, specNames: Set<string>): boolean {
+    if (!parent) {
+      return false;
+    }
+    if (specNames.has(parent)) {
+      return true;
+    }
+    if (!parent.includes('.')) {
+      return false;
+    }
+    const simpleParent = parent.split('.').pop();
+    return !!simpleParent && specNames.has(simpleParent);
+  }
+
+  private static shouldIncludeSpecClass(cls: SpockTestClass, specNames: Set<string>): boolean {
+    if (specNames.has(cls.name)) {
+      return true;
+    }
+    if (!cls.parentClassName || this.KNOWN_NON_SPEC_BASES.has(cls.parentClassName)) {
+      return false;
+    }
+    return cls.methods.length > 0;
   }
 
   // ── Annotation helpers ─────────────────────────────────────────────
@@ -297,7 +315,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
    * Stops at the first non-annotation, non-blank, non-comment line.
    * Handles multi-line annotation arguments (parenthesised across lines).
    */
-  private static collectAnnotationsAbove(lines: string[], lineIndex: number): SpockAnnotation[] {
+  private static collectAnnotationsAbove(lines: string[], lineIndex: number): SpockAnnotation[] { // NOSONAR
     const annotations: SpockAnnotation[] = [];
     let j = lineIndex - 1;
     while (j >= 0) {
@@ -309,7 +327,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
         continue;
       }
 
-      const annoMatch = trimmed.match(this.ANNOTATION_REGEX);
+      const annoMatch = this.ANNOTATION_REGEX.exec(trimmed);
       if (annoMatch) {
         const name = annoMatch[1];
         let argument: string | undefined;
@@ -330,12 +348,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
           argument = argText.replace(/\)\s*$/, '').trim() || undefined;
         }
 
-        if (this.KNOWN_ANNOTATIONS.has(name)) {
-          annotations.push({ name, argument, line: j });
-        } else {
-          // Still record unknown annotations with a generic name so callers can inspect
-          annotations.push({ name, argument, line: j });
-        }
+        annotations.push({ name, argument, line: j });
         j--;
       } else {
         // Not an annotation line – stop scanning

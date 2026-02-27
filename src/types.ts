@@ -22,7 +22,7 @@ export type SpockAnnotationName =
  */
 export interface SpockAnnotation {
   /** Simple name of the annotation, e.g. "Ignore" */
-  name: SpockAnnotationName | string;
+  name: string;
   /** Raw argument text inside the parentheses (if any) */
   argument?: string;
   /** 0-based line number where the annotation appears */

@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { BuildToolService } from '../services/BuildToolService';
 
 // Mock fs and ConfigurationService
-vi.mock('fs');
+vi.mock('node:fs');
 vi.mock('../services/ConfigurationService', () => ({
   ConfigurationService: {
     getConfig: () => ({
@@ -18,7 +18,7 @@ vi.mock('../services/ConfigurationService', () => ({
   },
 }));
 
-const mockedFs = vi.mocked(fs);
+const mockedFs = vi.mocked(fs, { deep: true });
 
 describe('BuildToolService', () => {
   beforeEach(() => {

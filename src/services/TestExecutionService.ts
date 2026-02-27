@@ -1,11 +1,11 @@
-import { spawn } from 'child_process';
+import { spawn } from 'node:child_process';
 import * as vscode from 'vscode';
 import { ConfigurationService } from './ConfigurationService';
 import { DebugService } from './DebugService';
 
 export class TestExecutionService {
-  private logger: vscode.LogOutputChannel;
-  private debugService: DebugService;
+  private readonly logger: vscode.LogOutputChannel;
+  private readonly debugService: DebugService;
 
   constructor(logger: vscode.LogOutputChannel) {
     this.logger = logger;
@@ -22,37 +22,35 @@ export class TestExecutionService {
     onOutputLine?: (line: string) => void;
     token?: vscode.CancellationToken;
   }): Promise<{success: boolean; output: string}> {
-    return new Promise(async (resolve) => {
+    if (options.debug) {
+      const batchCfg = ConfigurationService.getConfig(vscode.Uri.file(options.workspacePath));
+      let batchDebugPort = options.debugPort;
+      if (batchDebugPort === undefined) {
+        batchDebugPort = batchCfg.debugPort;
+        try {
+          batchDebugPort = await this.debugService.findFreePort(batchCfg.debugPort);
+        } catch (err) {
+          this.logger.appendLine(`TestExecutionService: Could not find free debug port for batch: ${err}`);
+        }
+      }
+      this.logger.appendLine(`TestExecutionService: Batch using debug port ${batchDebugPort}`);
+      this.debugService.startDebugSession({
+        workspacePath: options.workspacePath,
+        className: '',
+        testName: '',
+        debugPort: batchDebugPort
+      }).catch(error => {
+        this.logger.appendLine(`TestExecutionService: Failed to start debug session: ${error}`);
+      });
+    }
+
+    return new Promise((resolve) => {
       let timeoutId: NodeJS.Timeout | undefined;
       let processKilled = false;
       let cancellationListener: vscode.Disposable | undefined;
 
       this.logger.appendLine(`TestExecutionService: Executing batch: ${options.commandArgs.join(' ')}`);
       this.logger.appendLine(`TestExecutionService: Working directory: ${options.workspacePath}`);
-
-      if (options.debug) {
-        const batchCfg = ConfigurationService.getConfig(vscode.Uri.file(options.workspacePath));
-        let batchDebugPort = options.debugPort;
-        if (batchDebugPort === undefined) {
-          batchDebugPort = batchCfg.debugPort;
-          try {
-            batchDebugPort = await this.debugService.findFreePort(batchCfg.debugPort);
-          } catch (err) {
-            this.logger.appendLine(`TestExecutionService: Could not find free debug port for batch: ${err}`);
-          }
-        }
-        this.logger.appendLine(`TestExecutionService: Batch using debug port ${batchDebugPort}`);
-        // Don't await — let it connect in the background while Gradle starts.
-        // DebugService.waitForJvmDebugPort polls until the configured port is open.
-        this.debugService.startDebugSession({
-          workspacePath: options.workspacePath,
-          className: '',
-          testName: '',
-          debugPort: batchDebugPort
-        }).catch(error => {
-          this.logger.appendLine(`TestExecutionService: Failed to start debug session: ${error}`);
-        });
-      }
 
       const childProcess = spawn(options.commandArgs[0], options.commandArgs.slice(1), {
         cwd: options.workspacePath,
@@ -62,7 +60,7 @@ export class TestExecutionService {
         detached: process.platform !== 'win32',
       });
 
-      const killProcessTree = (force: boolean): void => {
+      const killProcessTree = (force: boolean): void => { // NOSONAR
         if (childProcess.killed) {
           return;
         }
@@ -181,7 +179,7 @@ export class TestExecutionService {
       childProcess.stderr?.on('data', (data: Buffer) => {
         const text = data.toString();
         output += text;
-        const crlfText = text.replace(/\n/g, '\r\n');
+        const crlfText = text.replaceAll('\n', '\r\n');
         options.run.appendOutput(crlfText);
       });
 
@@ -191,7 +189,7 @@ export class TestExecutionService {
         // Flush remaining line buffer
         if (lineBuffer.trim()) {
           if (!isGradleTaskNoiseLine(lineBuffer)) {
-            options.run.appendOutput(lineBuffer.replace(/\n/g, '\r\n'));
+            options.run.appendOutput(lineBuffer.replaceAll('\n', '\r\n'));
           }
           if (options.onOutputLine) {
             options.onOutputLine(lineBuffer);

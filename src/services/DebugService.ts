@@ -1,13 +1,13 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs';
-import * as net from 'net';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import * as net from 'node:net';
 import { DebugSessionOptions } from '../types';
 import { BuildToolService } from './BuildToolService';
 import { ConfigurationService } from './ConfigurationService';
 
 export class DebugService {
-  private logger: vscode.LogOutputChannel;
+  private readonly logger: vscode.LogOutputChannel;
 
   constructor(logger: vscode.LogOutputChannel) {
     this.logger = logger;

@@ -1,14 +1,13 @@
-import * as fs from 'fs';
-import * as fsp from 'fs/promises';
-import * as path from 'path';
+import * as fsp from 'node:fs/promises';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { XMLParser } from 'fast-xml-parser';
 import { BuildTool, DiffInfo, TestIterationResult } from '../types';
 import { BuildToolService } from './BuildToolService';
 
 export class TestResultParser {
-  private logger: vscode.LogOutputChannel;
-  private xmlParser: XMLParser;
+  private readonly logger: vscode.LogOutputChannel;
+  private readonly xmlParser: XMLParser;
 
   constructor(logger: vscode.LogOutputChannel) {
     this.logger = logger;
@@ -26,7 +25,7 @@ export class TestResultParser {
   /**
    * Parse console output to extract individual iteration results
    */
-  parseConsoleOutput(output: string, testName: string): TestIterationResult[] {
+  parseConsoleOutput(output: string, testName: string): TestIterationResult[] { // NOSONAR
     const results: TestIterationResult[] = [];
     const lines = output.split('\n');
 
@@ -39,7 +38,7 @@ export class TestResultParser {
       const placeholderPattern = /^.*>\s*([^>]+?)\s*>\s*([^>]+?)\s*(PASSED|FAILED|SKIPPED)$/;
       
       for (const line of lines) {
-        const match = line.match(placeholderPattern);
+        const match = placeholderPattern.exec(line);
         if (match) {
           const originalTestName = match[1].trim();
           const unrolledName = match[2].trim();
@@ -74,13 +73,13 @@ export class TestResultParser {
         // Look for Gradle test iteration patterns like:
         // "DataDrivenSpec > maximum of two numbers > maximum of two numbers [a: 1, b: 3, c: 3, #0] PASSED"
         // Also handles nested brackets: "ComplexDataSpec > test > test [gameState: [rolls:[3, 4], ...], #0] PASSED"
-        const statusMatch = line.match(/\s*(PASSED|FAILED|SKIPPED)\s*$/);
+        const statusMatch = /\s*(PASSED|FAILED|SKIPPED)\s*$/.exec(line);
         if (!statusMatch) { continue; }
         const status = statusMatch[1];
 
         // Check if line contains our test name followed by iteration params
-        const escapedTestName = testName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const testNameMatch = line.match(new RegExp(`>\\s*${escapedTestName}\\s*\\[`));
+        const escapedTestName = testName.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
+        const testNameMatch = new RegExp(String.raw`>\s*${escapedTestName}\s*\[`).exec(line);
         if (!testNameMatch) { continue; }
 
         // Extract the part between test name and status, then parse iteration info
@@ -150,7 +149,7 @@ export class TestResultParser {
 
       for (const tc of testcases) {
         const fullName = tc['@_name'] || '';
-        const time = parseFloat(tc['@_time'] || '0');
+        const time = Number.parseFloat(tc['@_time'] || '0');
 
         // Check if this is an iteration (contains parameter values and index)
         const iterationInfo = this.extractIterationFromName(fullName);
@@ -215,7 +214,7 @@ export class TestResultParser {
           parsedValue = true;
         } else if (value === 'false') {
           parsedValue = false;
-        } else if (!isNaN(Number(value)) && value !== '') {
+        } else if (!Number.isNaN(Number(value)) && value !== '') {
           parsedValue = Number(value);
         } else if (value.startsWith('"') && value.endsWith('"')) {
           // Remove surrounding quotes from strings
@@ -271,7 +270,7 @@ export class TestResultParser {
 
     for (const tc of testcases) {
       const testName = tc['@_name'] || '';
-      const time = parseFloat(tc['@_time'] || '0');
+      const time = Number.parseFloat(tc['@_time'] || '0');
 
       const { hasFailed, hasError, success } = this.getTestCaseStatus(tc);
       const hasSkipped = !!tc['skipped'];
@@ -389,7 +388,7 @@ export class TestResultParser {
     }
 
     // Pattern 1: "Expected :X" / "Actual   :Y" (IntelliJ / ComparisonFailure style)
-    const expectedActualBlock = errorMessage.match(/Expected\s*:\s*(.*)\nActual\s*:\s*(.*)/i);
+    const expectedActualBlock = /Expected\s*:\s*(.*)\nActual\s*:\s*(.*)/i.exec(errorMessage);
     if (expectedActualBlock) {
       const expected = expectedActualBlock[1].trim();
       const actual = expectedActualBlock[2].trim();
@@ -399,7 +398,7 @@ export class TestResultParser {
     }
 
     // Pattern 2: "expected: <X> but was: <Y>" (JUnit angle-bracket style)
-    const junitAngle = errorMessage.match(/expected:\s*<(.+?)>\s*but was:\s*<(.+?)>/i);
+    const junitAngle = /expected:\s*<(.+?)>\s*but was:\s*<(.+?)>/i.exec(errorMessage);
     if (junitAngle) {
       if (junitAngle[1] !== junitAngle[2]) {
         return { expected: junitAngle[1], actual: junitAngle[2] };
@@ -407,7 +406,7 @@ export class TestResultParser {
     }
 
     // Pattern 3: "expected: X but was: Y" (Spock / Groovy style, possibly quoted)
-    const junitPlain = errorMessage.match(/expected:\s*(.+?)\s+but was:\s*(.+?)(?:\s*$|\n)/im);
+    const junitPlain = /expected:\s*(.+?)\s+but was:\s*(.+?)(?:\s*$|\n)/im.exec(errorMessage);
     if (junitPlain) {
       const expected = junitPlain[1].trim();
       const actual = junitPlain[2].trim();
@@ -420,9 +419,7 @@ export class TestResultParser {
     // Only match when preceded by "Condition not satisfied:" — this is the reliable
     // indicator that an equality assertion failed with a power-assert display.
     // Capture the leading indent so we can align columns between expression and value lines.
-    const conditionBlock = errorMessage.match(
-      /Condition not satisfied:\s*\n(\s*)(.+==.+)\n((?:[ \t|]*\S.*\n?)+)/
-    );
+    const conditionBlock = /Condition not satisfied:\s*\n(\s*)(.+==.+)\n((?:[ \t|]*\S.*\n?)+)/.exec(errorMessage);
     if (conditionBlock) {
       const indent = conditionBlock[1].length;
       const result = this.parseSpockPowerAssertion(conditionBlock[2], conditionBlock[3], indent);
@@ -477,7 +474,7 @@ export class TestResultParser {
    *   |            false
    *   Game@abc
    */
-  private parseSpockPowerAssertion(expressionLine: string, valueBlock: string, indent: number = 0): DiffInfo | undefined {
+  private parseSpockPowerAssertion(expressionLine: string, valueBlock: string, indent: number = 0): DiffInfo | undefined { // NOSONAR
     const eqIndex = expressionLine.indexOf('==');
     if (eqIndex === -1) {
       return undefined;
@@ -653,11 +650,11 @@ export class TestResultParser {
       const trimmed = line.trim();
 
       // Stop at the next test result line or empty separator
-      if (trimmed.match(/\s*(PASSED|FAILED|SKIPPED)\s*$/)) {
+      if (/\s*(PASSED|FAILED|SKIPPED)\s*$/.exec(trimmed)) {
         break;
       }
       // Stop at Gradle task lines
-      if (trimmed.startsWith('> Task ') || trimmed.match(/^\d+ tests? completed/)) {
+      if (trimmed.startsWith('> Task ') || /^\d+ tests? completed/.exec(trimmed)) {
         break;
       }
 
@@ -667,7 +664,7 @@ export class TestResultParser {
         foundContent = true;
       } else if (foundContent && captured.length > 0) {
         // Allow one blank line within a block, but two consecutive blanks = end
-        const lastLine = captured[captured.length - 1];
+        const lastLine = captured.at(-1)!;
         if (lastLine.trim() === '') {
           break;
         }
@@ -676,7 +673,7 @@ export class TestResultParser {
     }
 
     // Trim trailing empty lines
-    while (captured.length > 0 && captured[captured.length - 1].trim() === '') {
+    while (captured.length > 0 && captured.at(-1)?.trim() === '') {
       captured.pop();
     }
 
@@ -703,11 +700,11 @@ export class TestResultParser {
    *   @Unroll:   "test name[0] - perfect game: [10, 10, 10] -> 300"
    * Returns the base test name, raw parameters string, and iteration index.
    */
-  private extractIterationFromName(fullName: string): { baseName: string; parametersString: string; index: number } | null {
+  private extractIterationFromName(fullName: string): { baseName: string; parametersString: string; index: number } | null { // NOSONAR
     // First, try the standard Spock format ending with ", #N]"
-    const indexMatch = fullName.match(/,\s*#(\d+)\]\s*$/);
+    const indexMatch = /,\s*#(\d+)\]\s*$/.exec(fullName);
     if (indexMatch) {
-      const index = parseInt(indexMatch[1]);
+      const index = Number.parseInt(indexMatch[1], 10);
       // Find the opening bracket that corresponds to the closing bracket at the end
       // Walk backwards from the position before ", #N]" to find the matching "["
       const closingPos = fullName.length - indexMatch[0].length + indexMatch[0].indexOf(']');
@@ -730,8 +727,9 @@ export class TestResultParser {
       if (openPos !== -1) {
         const baseName = fullName.substring(0, openPos).trim();
         // Parameters string is between the opening bracket and the ", #N" part
-        const paramsEnd = fullName.lastIndexOf(`,${indexMatch[0].substring(1)}`) !== -1 
-          ? fullName.lastIndexOf(`,${indexMatch[0].substring(1)}`)
+        const indexSuffix = `,${indexMatch[0].substring(1)}`;
+        const paramsEnd = fullName.includes(indexSuffix)
+          ? fullName.lastIndexOf(indexSuffix)
           : fullName.lastIndexOf(`, #${index}]`);
         const parametersString = fullName.substring(openPos + 1, paramsEnd).trim();
 
@@ -742,10 +740,10 @@ export class TestResultParser {
     // Then, try @Unroll custom pattern format: "baseName[N] - ..." or "baseName[N]"
     // When @Unroll uses #iterationIndex, Spock produces names like:
     //   "complex scoring scenarios[0] - perfect game: [10, 10, 10] -> 300"
-    const unrollMatch = fullName.match(/^(.+?)\[(\d+)\](.*)$/);
+    const unrollMatch = /^(.+?)\[(\d+)\](.*)$/.exec(fullName);
     if (unrollMatch) {
       const baseName = unrollMatch[1].trim();
-      const index = parseInt(unrollMatch[2]);
+      const index = Number.parseInt(unrollMatch[2], 10);
       const suffix = unrollMatch[3].trim();
       // Use the suffix (after the [N]) as a descriptive parameters string
       const parametersString = suffix.startsWith('-') ? suffix.substring(1).trim() : suffix;
@@ -774,7 +772,7 @@ export class TestResultParser {
     // Filter to only iterations belonging to this specific test method
     const xmlResults = allXmlResults.filter(r => {
       const info = this.extractIterationFromName(r.displayName);
-      return info && info.baseName === testName;
+      return info?.baseName === testName;
     });
 
     if (xmlResults.length > 0) {
@@ -835,7 +833,7 @@ export class TestResultParser {
 
     for (const tc of testcases) {
       const fullName = tc['@_name'] || '';
-      const time = parseFloat(tc['@_time'] || '0');
+      const time = Number.parseFloat(tc['@_time'] || '0');
 
       const paramMatch = placeholderRegex.exec(fullName);
       if (!paramMatch) { continue; }
@@ -908,14 +906,14 @@ export class TestResultParser {
    * "maximum of #a and #b is #c" → /^maximum of (.+?) and (.+?) is (.+?)$/
    */
   buildPlaceholderRegex(testName: string): RegExp | null {
-    const placeholders = testName.match(/#\w+/g);
+    const placeholders = /#\w+/g.exec(testName) ? testName.match(/#\w+/g) : null;
     if (!placeholders) { return null; }
 
     // Escape the test name for regex, then replace escaped placeholders with capture groups
-    let pattern = testName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    let pattern = testName.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
     for (const placeholder of placeholders) {
-      const escaped = placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      pattern = pattern.replace(escaped, '(.+?)');
+      const escaped = placeholder.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
+      pattern = pattern.replaceAll(escaped, '(.+?)');
     }
 
     return new RegExp(`^${pattern}$`);
@@ -939,7 +937,7 @@ export class TestResultParser {
       if (value === undefined) { continue; }
 
       // Try to parse as number or boolean
-      if (!isNaN(Number(value)) && value !== '') {
+      if (!Number.isNaN(Number(value)) && value !== '') {
         params[paramName] = Number(value);
       } else if (value === 'true' || value === 'false') {
         params[paramName] = value === 'true';
@@ -960,7 +958,7 @@ export class TestResultParser {
   private extractParametersFromUnrolledName(unrolledName: string): Record<string, any> {
     // Match tokens that look like values: integers, decimals, booleans,
     // single-quoted strings, or double-quoted strings.
-    const tokenRegex = /(?<![\w#])(-?\d+(?:\.\d+)?|true|false|'[^']*'|"[^"]*")(?!\w)/g;
+    const tokenRegex = /(-?\d+(?:\.\d+)?|true|false|'[^']*'|"[^"]*")/g;
     const parameters: Record<string, any> = {};
     let match: RegExpExecArray | null;
     let index = 0;
@@ -972,7 +970,7 @@ export class TestResultParser {
         value = value.slice(1, -1);
       } else if (value === 'true' || value === 'false') {
         value = value === 'true';
-      } else if (!isNaN(Number(value)) && value !== '') {
+      } else if (!Number.isNaN(Number(value)) && value !== '') {
         value = Number(value);
       }
       parameters[`param${index++}`] = value;

@@ -15,11 +15,11 @@ import { TestRunCoordinator } from './TestRunCoordinator';
  * {@link TestTreeManager}, {@link ResultProcessor}, and {@link TestRunCoordinator}.
  */
 export class SpockTestController {
-  private controller: vscode.TestController;
-  private logger: vscode.LogOutputChannel;
-  private treeManager: TestTreeManager;
-  private resultProcessor: ResultProcessor;
-  private runCoordinator: TestRunCoordinator;
+  private readonly controller: vscode.TestController;
+  private readonly logger: vscode.LogOutputChannel;
+  private readonly treeManager: TestTreeManager;
+  private readonly resultProcessor: ResultProcessor;
+  private readonly runCoordinator: TestRunCoordinator;
   private initialDiscoveryCompleted = false;
   private fullDiscoveryPromise: Promise<void> | undefined;
 
@@ -69,22 +69,23 @@ export class SpockTestController {
     this.registerCommands(context);
 
     // Automatically discover tests on startup
+    this.startInitialDiscovery();
+
+    context.subscriptions.push(this.controller, { dispose: () => this.treeManager.dispose() });
+  }
+
+  private startInitialDiscovery(): void {
     this.logger.appendLine('SpockTestController: Starting automatic test discovery...');
-    this.ensureFullDiscovery(true, 'startup').catch(error => {
+    void this.ensureFullDiscovery(true, 'startup').catch(error => {
       this.logger.appendLine(`SpockTestController: Error during automatic discovery: ${error}`);
     });
-
-    context.subscriptions.push(this.controller);
-    context.subscriptions.push({ dispose: () => this.treeManager.dispose() });
   }
 
   private setupTestController(): void {
     this.controller.resolveHandler = async (test) => {
       this.logger.appendLine(`SpockTestController: resolveHandler called with test: ${test ? test.id : 'null'}`);
 
-      if (!test) {
-        await this.ensureFullDiscovery(false, 'resolveHandler');
-      } else {
+      if (test) {
         const data = this.treeManager.testData.get(test);
         if (data?.type === 'project' || data?.type === 'subproject' || data?.type === 'package') {
           this.logger.appendLine(`SpockTestController: Skipping resolve for ${data.type} node: ${test.label}`);
@@ -92,7 +93,9 @@ export class SpockTestController {
         }
         this.logger.appendLine(`SpockTestController: Discovering tests in file: ${test.uri?.fsPath}`);
         await this.treeManager.discoverTestsInFile(test);
+        return;
       }
+      await this.ensureFullDiscovery(false, 'resolveHandler');
     };
 
     this.controller.refreshHandler = async (token: vscode.CancellationToken) => {

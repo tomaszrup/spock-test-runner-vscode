@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { SpockTestController } from './testController';
 
+let spockController: SpockTestController | undefined;
+
 export function activate(context: vscode.ExtensionContext) {
   const logger = vscode.window.createOutputChannel('Spock Test Runner', { log: true });
   context.subscriptions.push(logger);
@@ -10,7 +12,7 @@ export function activate(context: vscode.ExtensionContext) {
   // tells VS Code ≥ 1.72 to disable us outright; the runtime check below is
   // defence-in-depth for older hosts.
   if (vscode.workspace.isTrusted) {
-    new SpockTestController(context, logger);
+    spockController = new SpockTestController(context, logger);
   } else {
     logger.appendLine('Workspace is not trusted — deferring controller creation.');
     void vscode.window.showWarningMessage(
@@ -18,11 +20,13 @@ export function activate(context: vscode.ExtensionContext) {
     );
     const trustDisposable = vscode.workspace.onDidGrantWorkspaceTrust(() => {
       logger.appendLine('Workspace trust granted — creating test controller.');
-      new SpockTestController(context, logger);
+      spockController = new SpockTestController(context, logger);
       trustDisposable.dispose();
     });
     context.subscriptions.push(trustDisposable);
   }
 }
 
-export function deactivate() {}
+export function deactivate() {
+  spockController = undefined;
+}
