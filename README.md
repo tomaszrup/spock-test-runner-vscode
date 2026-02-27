@@ -194,7 +194,7 @@ Gradle is checked first. If both `build.gradle` and `pom.xml` exist, Gradle take
 ├── .github/
 │   └── workflows/
 │       └── ci.yml                   # CI pipeline (test, coverage badges)
-├── sonar-project.properties         # SonarCloud analysis configuration
+├── .sonarcloud.properties           # SonarCloud analysis configuration
 ├── .vscode/
 │   ├── launch.json                  # Run/debug extension configurations
 │   ├── tasks.json                   # Build tasks

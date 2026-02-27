@@ -30,17 +30,6 @@ jobs:
       - name: Run tests with coverage
         run: npx vitest run --coverage
 
-      - name: SonarCloud Scan
-        if: ${{ secrets.SONAR_TOKEN != '' }}
-        uses: SonarSource/sonarqube-scan-action@v5
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        with:
-          args: >
-            -Dsonar.exclusions=sample/**,out/**,coverage/**,node_modules/**,**/*.test.ts,src/__mocks__/**,src/__test_helpers__/**,**/*.groovy
-            -Dsonar.inclusions=**/*.ts
-            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
-
       - name: Generate Coverage Badge
         run: |
           if [ ! -f coverage/coverage-summary.json ]; then
