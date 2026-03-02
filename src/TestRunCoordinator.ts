@@ -44,7 +44,8 @@ interface BatchRunContext {
 }
 
 const BUILD_FAILURE_NOISE_PATTERNS: RegExp[] = [
-  /^>\s*Task\s+:[^\s]+\s+(UP-TO-DATE|NO-SOURCE|FROM-CACHE|SKIPPED|SUCCESS|EXECUTED)\s*$/i,
+  /^>\s*Task\s+/i,
+  /^>\s*Configure project\s+/i,
   /^>?\s*Compilation failed; see the compiler error output for details\.?$/i,
   /^\* Try:/i,
   /^\* Get more help/i,
@@ -52,7 +53,6 @@ const BUILD_FAILURE_NOISE_PATTERNS: RegExp[] = [
   /^Deprecated Gradle features/i,
   /^BUILD (FAILED|SUCCESSFUL)\b/i,
   /^FAILURE:\s+Build failed with an exception\.?\s*$/i,
-  /^>\s*Task\s+:[^\s]+\s+FAILED\s*$/i,
   /^\d+ actionable task/i,
   /^BUILD FAILED in\s+/i,
   /^\[ERROR\]\s+BUILD FAILURE\s*$/i,

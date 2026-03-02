@@ -944,6 +944,65 @@ describe('TestRunCoordinator', () => {
       );
     });
 
+    it('should filter > Task lines without status suffixes from per-test build failure message', async () => {
+      const run = createMockRun();
+      const erroredSpy = run.errored;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'should work', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'MySpec', testName: 'should work' });
+
+      // Simulate a large multi-subproject build where many > Task lines appear
+      // without any status suffix (Gradle prints these when a task starts executing)
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: [
+          '> Configure project :core',
+          '> Configure project :api',
+          '> Task :core:compileJava',
+          '> Task :core:processResources',
+          '> Task :core:classes',
+          '> Task :api:compileJava',
+          '> Task :api:processResources',
+          '> Task :api:classes',
+          '> Task :api:jar',
+          '> Task :service:compileJava',
+          '> Task :service:processResources',
+          '> Task :service:classes',
+          '> Task :service:compileTestGroovy FAILED',
+          '',
+          'startup failed:',
+          '/workspace/src/test/groovy/MySpec.groovy: 5: unable to resolve class SomeUnknownDependency',
+          ' @ line 5, column 1.',
+          '   import com.example.SomeUnknownDependency',
+          '   ^',
+          '',
+          'Compilation failed; see the compiler error output for details.',
+          '',
+          'BUILD FAILED',
+        ].join('\n'),
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      // Per-test error should contain the actual compilation error
+      expect(erroredSpy).toHaveBeenCalledWith(
+        test1,
+        expect.objectContaining({ message: expect.stringContaining('unable to resolve class SomeUnknownDependency') }),
+        expect.any(Number),
+      );
+      // Per-test error must NOT contain > Task lines (with or without status suffix)
+      const errorCall = erroredSpy.mock.calls.find((c: any) => c[0] === test1);
+      expect(errorCall).toBeDefined();
+      const errorMsg = errorCall![1].message as string;
+      expect(errorMsg).not.toMatch(/>\s*Task\s+/i);
+      // Per-test error must NOT contain > Configure project lines
+      expect(errorMsg).not.toMatch(/>\s*Configure project\s+/i);
+    });
+
     it('should not show plain Test failed when XML failure lacks error message', async () => {
       const run = createMockRun();
       const failedSpy = run.failed;
@@ -1419,12 +1478,14 @@ describe('TestRunCoordinator', () => {
       expect(passedSpy).not.toHaveBeenCalled();
 
       const expectedErroredMessage = [
-        ...preBuildTaskLines,
         'Startup failed:',
         'src/test/groovy/com/example/BuildFailureSpec.groovy: 23: unable to resolve class MissingCollaborator',
         '@ line 23, column 17.',
         'MissingCollaborator collaborator = new MissingCollaborator()',
         '^',
+        '1 error',
+        '* What went wrong:',
+        "Execution failed for task ':compileTestGroovy'.",
       ].join('\n');
 
       const erroredMessagesByTest = new Map(
