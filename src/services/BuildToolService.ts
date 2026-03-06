@@ -671,12 +671,14 @@ export class BuildToolService {
     }
     const taskName = subprojectPrefix ? `${subprojectPrefix}:test` : 'test';
     const baseArgs = [gradleCommand, taskName, '--tests', escapedTestName];
+    const rerunTaskArgs = ['--rerun-tasks'];
     
     const initScriptPath = shellEscape(await this.getInitScriptPath());
     const initScriptArgs = ['--init-script', initScriptPath];
     
     if (logger) {
-      logger.appendLine(`BuildToolService: Using Gradle init script to force test execution (--init-script)`);
+      logger.appendLine('BuildToolService: Forcing Gradle producer tasks to rerun (--rerun-tasks) to avoid stale compiled outputs');
+      logger.appendLine('BuildToolService: Using Gradle init script to force test execution (--init-script)');
     }
     
     const extraArgs = validateExtraArgs(cfg.additionalGradleArgs, 'gradle', logger);
@@ -684,9 +686,9 @@ export class BuildToolService {
     if (debug) {
       const port = debugPort ?? cfg.debugPort;
       const jvmDebugArg = `-Dorg.gradle.jvmargs=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${port}`;
-      return [...baseArgs, '--debug-jvm', jvmDebugArg, ...initScriptArgs, ...extraArgs];
+      return [...baseArgs, ...rerunTaskArgs, '--debug-jvm', jvmDebugArg, ...initScriptArgs, ...extraArgs];
     } else {
-      return [...baseArgs, ...initScriptArgs, ...extraArgs];
+      return [...baseArgs, ...rerunTaskArgs, ...initScriptArgs, ...extraArgs];
     }
   }
 
@@ -712,7 +714,7 @@ export class BuildToolService {
     }
 
     const taskName = subprojectPrefix ? `${subprojectPrefix}:test` : 'test';
-    const args = [gradleCommand, taskName];
+    const args = [gradleCommand, taskName, '--rerun-tasks'];
     const coalesced = this.coalesceGradleFilters(testFilters, classTestCounts, logger);
     for (const filter of coalesced) {
       args.push('--tests', shellEscape(sanitizeTestFilter(filter, logger)));
@@ -724,6 +726,7 @@ export class BuildToolService {
     args.push('--init-script', initScriptPath);
 
     if (logger) {
+      logger.appendLine('BuildToolService: Forcing Gradle producer tasks to rerun (--rerun-tasks) to avoid stale compiled outputs');
       logger.appendLine(`BuildToolService: Batch execution with ${testFilters.length} test filter(s)${coverage ? ' (with coverage)' : ''}`);
     }
 

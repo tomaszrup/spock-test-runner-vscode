@@ -17,7 +17,7 @@ A VS Code extension that provides comprehensive test support for the [Spock test
 - **Debug Support** — Debug Spock tests with full breakpoint support and variable inspection
 - **Parameterized Tests** — Full support for data-driven tests with `where` blocks, including individual iteration results
 - **Code Coverage** — JaCoCo-based coverage via a Gradle init script, with line-level results in VS Code's Coverage panel
-- **Gradle Integration** — Works with Gradle projects, including multi-module builds (uses init scripts to force test re-execution)
+- **Gradle Integration** — Works with Gradle projects, including multi-module builds (uses `--rerun-tasks` plus init scripts to avoid stale test outputs)
 - **Maven Integration** — Works with Maven projects, including multi-module builds (uses Surefire for test execution and result parsing)
 - **Groovy Language Support** — Contributes Groovy language configuration (brackets, comments, auto-closing pairs)
 - **Re-run Failed Tests** — Dedicated run profile that re-executes only the tests that failed in the previous run
@@ -134,7 +134,7 @@ Gradle is checked first. If both `build.gradle` and `pom.xml` exist, Gradle take
 
 ### Force Test Execution
 
-- **Gradle**: Up-to-date check is bypassed via an init script (`resources/force-tests.init.gradle`) so tests always run, even if sources haven't changed.
+- **Gradle**: The extension runs Gradle with `--rerun-tasks` and an init script (`resources/force-tests.init.gradle`) so test producer tasks are rebuilt and test tasks always execute, even when Gradle would otherwise reuse stale outputs.
 - **Maven**: Surefire runs tests on every invocation by default (no caching mechanism to bypass).
 
 ### Code Coverage
@@ -185,7 +185,7 @@ Gradle is checked first. If both `build.gradle` and `pom.xml` exist, Gradle take
 │   └── spock.png                    # Extension icon
 ├── resources/
 │   ├── coverage.init.gradle         # Gradle init script to inject JaCoCo for coverage
-│   └── force-tests.init.gradle      # Gradle init script to bypass up-to-date checks
+│   └── force-tests.init.gradle      # Gradle init script to keep test logging consistent and bypass Test-task up-to-date checks
 ├── sample/
 │   ├── sample-project/              # Sample Gradle + Spock project (Java 21, Spock 2.4-M1)
 │   │   └── sub-module/              # Gradle sub-module for multi-module testing

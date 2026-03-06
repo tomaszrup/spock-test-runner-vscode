@@ -814,6 +814,7 @@ export class TestRunCoordinator {
     context: BatchRunContext,
   ): Promise<void> {
     const {
+      classTestCounts,
       testLookup,
       tests,
       debug,
@@ -830,7 +831,7 @@ export class TestRunCoordinator {
     // Execute tests
     const commandArgs = await this.buildToolService.buildBatchCommandArgs(
       testFilters, debug, rootProject, this.logger, subprojectPrefix,
-      { coverage, buildTool, debugPort },
+      { coverage, buildTool, debugPort, classTestCounts },
     );
 
     this.logger.appendLine(`TestRunCoordinator: Running batch of ${tests.length} test(s) in ${projectRoot}${coverage ? ' (with coverage)' : ''}`);
@@ -1309,12 +1310,11 @@ export class TestRunCoordinator {
       }
     }
 
-    // Limit stack trace depth: keep at most 3 'at ...' lines per block
-    const trimmed = this.trimStackTraceDepth(collected, 3);
+    const focused = this.focusBuildFailureLines(collected);
+    const trimmed = this.trimStackTraceDepth(focused, 8);
 
     if (trimmed.length > 0) {
-      // Cap at ~25 lines to avoid overwhelming the UI
-      return trimmed.slice(0, 25).join('\n');
+      return trimmed.slice(0, 40).join('\n');
     }
 
     return 'Build failed (no details available in output).';
@@ -1326,6 +1326,65 @@ export class TestRunCoordinator {
       return true;
     }
     return BUILD_FAILURE_NOISE_PATTERNS.some((pattern) => pattern.test(trimmed));
+  }
+
+  private focusBuildFailureLines(lines: string[]): string[] {
+    if (lines.length === 0) {
+      return lines;
+    }
+
+    const anchorIndex = this.findBuildFailureAnchorIndex(lines);
+    if (anchorIndex < 0) {
+      return lines;
+    }
+
+    let startIndex = anchorIndex;
+    while (startIndex > 0 && this.isBuildFailureContextLine(lines[startIndex - 1])) {
+      startIndex--;
+    }
+
+    return lines.slice(startIndex);
+  }
+
+  private findBuildFailureAnchorIndex(lines: string[]): number {
+    const anchorGroups: RegExp[][] = [
+      [
+        /^startup failed:\s*$/i,
+        /\.(java|groovy|kt|kts|gradle):\s*\d+/i,
+        /\b(unable to resolve class|could not resolve|cannot find symbol|startup failed|\d+\s+errors?)\b/i,
+      ],
+      [
+        /^Caused by:\s+/i,
+        /^Exception is:\s*$/i,
+        /^\S.*(?:Exception|Error)(?::|\b)/,
+        /^at\s+/i,
+      ],
+      [
+        /^\* What went wrong:\s*$/i,
+        /^Execution failed for task\b/i,
+        /^\[ERROR\]\s+Failed to execute goal\b/i,
+      ],
+    ];
+
+    for (const group of anchorGroups) {
+      const index = lines.findIndex((line) => group.some((pattern) => pattern.test(line)));
+      if (index >= 0) {
+        return index;
+      }
+    }
+
+    return -1;
+  }
+
+  private isBuildFailureContextLine(line: string): boolean {
+    return (
+      /^startup failed:\s*$/i.test(line)
+      || /^\* What went wrong:\s*$/i.test(line)
+      || /^Execution failed for task\b/i.test(line)
+      || /^Caused by:\s+/i.test(line)
+      || /^Exception is:\s*$/i.test(line)
+      || /^\S.*(?:Exception|Error)(?::|\b)/.test(line)
+    );
   }
 
   private trimStackTraceDepth(lines: string[], maxPerBlock: number): string[] {

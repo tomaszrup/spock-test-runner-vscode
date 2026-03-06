@@ -550,12 +550,12 @@ describe('TestRunCoordinator', () => {
 
       await coordinator.runBatch('/workspace/project', { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 }, tests, run as any, false, createCancellationToken());
 
-      // buildBatchCommandArgs should have been called with classTestCounts as the last arg
+      // buildBatchCommandArgs should receive classTestCounts inside the options object
       const calls = buildToolService.buildBatchCommandArgs.mock.calls;
-      // At least one call should have a Map as the last argument
+      // At least one call should include the class test counts map in options
       const hasClassTestCounts = calls.some((call: any[]) => {
-        const lastArg = call[call.length - 1];
-        return lastArg instanceof Map && lastArg.get('MySpec') === 2;
+        const options = call.at(-1);
+        return options?.classTestCounts instanceof Map && options.classTestCounts.get('MySpec') === 2;
       });
       expect(hasClassTestCounts).toBe(true);
     });
@@ -909,6 +909,60 @@ describe('TestRunCoordinator', () => {
       );
     });
 
+    it('should focus noisy multi-project build failures on the concrete error block and keep deeper stack traces', async () => {
+      const run = createMockRun();
+      const erroredSpy = run.errored;
+      controller.createTestRun = vi.fn(() => run);
+
+      const test1 = controller.createTestItem('t1', 'blocked by dependency compile', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(test1, { type: 'test', className: 'Spec', testName: 'blocked by dependency compile' });
+
+      const unrelatedWorkspaceLines = Array.from({ length: 18 }, (_, index) =>
+        `Included build ':lib${index + 1}' prepared task graph`,
+      );
+
+      executionService.executeBatch.mockResolvedValue({
+        success: false,
+        output: [
+          ...unrelatedWorkspaceLines,
+          '> Task :app:compileGroovy FAILED',
+          '* What went wrong:',
+          "Execution failed for task ':app:compileGroovy'.",
+          'Caused by: java.lang.RuntimeException: Failed to compile workspace dependency',
+          '    at com.example.Top.one(Top.java:10)',
+          '    at com.example.Top.two(Top.java:20)',
+          '    at com.example.Top.three(Top.java:30)',
+          '    at com.example.Top.four(Top.java:40)',
+          '    at com.example.Top.five(Top.java:50)',
+          '    at com.example.Top.six(Top.java:60)',
+          'Caused by: org.gradle.api.GradleException: Symbol resolution crashed',
+          '    at com.example.Dependency.one(Dependency.java:11)',
+          '    at com.example.Dependency.two(Dependency.java:22)',
+          '    at com.example.Dependency.three(Dependency.java:33)',
+          '    at com.example.Dependency.four(Dependency.java:44)',
+          '* Try:',
+          '> Run with --stacktrace option to get the stack trace.',
+          'BUILD FAILED in 4s',
+        ].join('\n'),
+      });
+      resultParser.parseClassTestResults.mockResolvedValue(new Map());
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest([test1]);
+      await coordinator.runHandler(false, request, token);
+
+      const errorCall = erroredSpy.mock.calls.find((call: any[]) => call[0] === test1);
+      expect(errorCall).toBeDefined();
+
+      const errorMsg = errorCall![1].message;
+      expect(errorMsg).toContain("Execution failed for task ':app:compileGroovy'.");
+      expect(errorMsg).toContain('Caused by: java.lang.RuntimeException: Failed to compile workspace dependency');
+      expect(errorMsg).toContain('at com.example.Top.six(Top.java:60)');
+      expect(errorMsg).toContain('at com.example.Dependency.four(Dependency.java:44)');
+      expect(errorMsg).not.toContain("Included build ':lib1' prepared task graph");
+      expect(errorMsg).not.toContain('Run with --stacktrace option to get the stack trace.');
+    });
+
     it('should skip generic compiler-output hint and show concrete compiler error', async () => {
       const run = createMockRun();
       const erroredSpy = run.errored;
@@ -997,7 +1051,7 @@ describe('TestRunCoordinator', () => {
       // Per-test error must NOT contain > Task lines (with or without status suffix)
       const errorCall = erroredSpy.mock.calls.find((c: any) => c[0] === test1);
       expect(errorCall).toBeDefined();
-      const errorMsg = errorCall![1].message as string;
+      const errorMsg = errorCall![1].message;
       expect(errorMsg).not.toMatch(/>\s*Task\s+/i);
       // Per-test error must NOT contain > Configure project lines
       expect(errorMsg).not.toMatch(/>\s*Configure project\s+/i);

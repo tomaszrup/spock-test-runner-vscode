@@ -253,6 +253,11 @@ describe('BuildToolService', () => {
       expect(args).toContain('--init-script');
     });
 
+    it('should include --rerun-tasks for Gradle test runs', async () => {
+      const args = await BuildToolService.buildCommandArgs('MySpec', false, '/project');
+      expect(args).toContain('--rerun-tasks');
+    });
+
     it('should use subproject prefix when provided', async () => {
       const args = await BuildToolService.buildCommandArgs('MySpec', false, '/project', undefined, ':submodule');
       expect(args).toContain(':submodule:test');
@@ -296,6 +301,15 @@ describe('BuildToolService', () => {
       // The init script path should be the coverage one
       const initIdx = args.indexOf('--init-script');
       expect(args[initIdx + 1]).toContain('coverage');
+    });
+
+    it('should include --rerun-tasks for Gradle batch runs', async () => {
+      const args = await BuildToolService.buildBatchCommandArgs(
+        ['TestA'],
+        false,
+        '/project'
+      );
+      expect(args).toContain('--rerun-tasks');
     });
   });
 
@@ -1018,7 +1032,7 @@ describe('BuildToolService', () => {
   // ── splitGradleTestFilters ──────────────────────────────────────────
 
   describe('splitGradleTestFilters', () => {
-    const baseArgs = ['gradlew.bat', 'test', '--init-script', '"path/to/init.gradle"'];
+    const baseArgs = ['gradlew.bat', 'test', '--rerun-tasks', '--init-script', '"path/to/init.gradle"'];
 
     it('should return single batch when everything fits', () => {
       const filters = ['ClassA.test1', 'ClassB.test2'];
