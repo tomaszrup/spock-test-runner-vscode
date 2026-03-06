@@ -316,6 +316,9 @@ export const window = {
     const token = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => {} }) };
     return task(progress, token);
   },
+  setStatusBarMessage: (_text: string, _hideAfterTimeoutOrThenable?: number | Thenable<any>) => ({
+    dispose: () => {},
+  }),
   showErrorMessage: async () => undefined,
   showWarningMessage: async () => undefined,
   showInformationMessage: async () => undefined,

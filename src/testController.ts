@@ -8,6 +8,7 @@ import { TestResultParser } from './services/TestResultParser';
 import { TestTreeManager } from './TestTreeManager';
 import { ResultProcessor } from './ResultProcessor';
 import { TestRunCoordinator } from './TestRunCoordinator';
+import { showInfoStatus } from './statusBar';
 
 /**
  * Thin façade that wires together tree management, result processing,
@@ -200,7 +201,7 @@ export class SpockTestController {
       this.logger.appendLine('SpockTestController: Re-run Failed Tests command triggered');
 
       if (this.runCoordinator.lastFailedTests.size === 0) {
-        vscode.window.showInformationMessage('No failed tests to re-run.');
+        showInfoStatus('No failed tests to re-run.');
         return;
       }
 
@@ -222,7 +223,7 @@ export class SpockTestController {
       findFailedItems(this.controller.items);
 
       if (failedItems.length === 0) {
-        vscode.window.showInformationMessage('Previously failed tests are no longer in the test tree.');
+        showInfoStatus('Previously failed tests are no longer in the test tree.');
         return;
       }
 

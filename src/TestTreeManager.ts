@@ -125,7 +125,7 @@ export class TestTreeManager {
     try {
       await vscode.window.withProgress(
         {
-          location: vscode.ProgressLocation.Notification,
+          location: vscode.ProgressLocation.Window,
           title: 'Discovering Spock Tests',
           cancellable: true,
         },

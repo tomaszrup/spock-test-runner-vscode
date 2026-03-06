@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import { BuildTool } from '../types';
 import { ConfigurationService } from './ConfigurationService';
+import { showWarningStatus } from '../statusBar';
 
 const fsp = fs.promises;
 const XML_PARENT_BLOCK_REGEX = /<parent>[\s\S]*?<\/parent>/g;
@@ -609,9 +610,7 @@ export class BuildToolService {
     const detected = buildTool || (workspacePath ? await this.detectBuildTool(workspacePath) : null);
     if (!detected && logger) {
       logger.appendLine('BuildToolService: WARNING — neither Gradle nor Maven detected, defaulting to Gradle');
-      void vscode.window.showWarningMessage(
-        'Spock Test Runner: No Gradle or Maven project detected in the workspace. Defaulting to Gradle.'
-      );
+      showWarningStatus('No Gradle or Maven project detected in the workspace. Defaulting to Gradle.');
     }
     const detectedTool: BuildTool = detected || 'gradle';
 
@@ -633,9 +632,7 @@ export class BuildToolService {
     const detected = buildTool || (workspacePath ? await this.detectBuildTool(workspacePath) : null);
     if (!detected && logger) {
       logger.appendLine('BuildToolService: WARNING — neither Gradle nor Maven detected, defaulting to Gradle');
-      void vscode.window.showWarningMessage(
-        'Spock Test Runner: No Gradle or Maven project detected in the workspace. Defaulting to Gradle.'
-      );
+      showWarningStatus('No Gradle or Maven project detected in the workspace. Defaulting to Gradle.');
     }
     const detectedTool: BuildTool = detected || 'gradle';
 

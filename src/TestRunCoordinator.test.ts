@@ -211,7 +211,7 @@ describe('TestRunCoordinator', () => {
   describe('rerunFailedHandler', () => {
     it('should show info message when no failed tests exist', async () => {
       coordinator.lastFailedTests.clear();
-      const infoSpy = vi.spyOn(vscode.window, 'showInformationMessage' as any);
+      const infoSpy = vi.spyOn(vscode.window, 'setStatusBarMessage' as any);
       const request = new vscode.TestRunRequest();
       const token = createCancellationToken();
 

@@ -9,6 +9,7 @@ import { extractErrorForTest, hasErrorForTest } from './services/SpockErrorParse
 import { TestData, BuildTool } from './types';
 import { TestTreeManager } from './TestTreeManager';
 import { ResultProcessor } from './ResultProcessor';
+import { showInfoStatus, showWarningStatus } from './statusBar';
 
 /** Entry tracked per test in the lookup map during a batch run. */
 interface TestLookupEntry {
@@ -230,7 +231,7 @@ export class TestRunCoordinator {
   async rerunFailedHandler(request: vscode.TestRunRequest, token: vscode.CancellationToken): Promise<void> {
     if (this.lastFailedTests.size === 0) {
       this.logger.appendLine('TestRunCoordinator: Re-run Failed — no failed tests to re-run');
-      vscode.window.showInformationMessage('No failed tests to re-run.');
+      showInfoStatus('No failed tests to re-run.');
       return;
     }
 
@@ -272,7 +273,7 @@ export class TestRunCoordinator {
 
     if (failedItems.length === 0) {
       this.logger.appendLine('TestRunCoordinator: Re-run Failed — failed tests no longer exist in tree');
-      vscode.window.showInformationMessage('Previously failed tests are no longer in the test tree.');
+      showInfoStatus('Previously failed tests are no longer in the test tree.');
       return;
     }
 
@@ -440,7 +441,7 @@ export class TestRunCoordinator {
   ): Promise<void> {
     await vscode.window.withProgress(
       {
-        location: vscode.ProgressLocation.Notification,
+        location: vscode.ProgressLocation.Window,
         title: 'Running Spock Tests',
         cancellable: true,
       },
@@ -1423,9 +1424,7 @@ export class TestRunCoordinator {
       this.logger.appendLine('TestRunCoordinator: No JaCoCo XML reports found — coverage data unavailable');
       if (!this.notifiedCoverageMissing) {
         this.notifiedCoverageMissing = true;
-        void vscode.window.showInformationMessage(
-          'Spock Test Runner: Coverage data is unavailable because no JaCoCo XML report was found for this run.',
-        );
+        showInfoStatus('Coverage data is unavailable because no JaCoCo XML report was found for this run.', 10000);
       }
     }
   }
@@ -1439,15 +1438,16 @@ export class TestRunCoordinator {
     try {
       const resolvedPort = await this.debugService.findFreePort(cfg.debugPort);
       if (resolvedPort !== cfg.debugPort) {
-        void vscode.window.showInformationMessage(
-          `Spock Test Runner: Preferred debug port ${cfg.debugPort} is in use; using ${resolvedPort} for this run.`,
+        showInfoStatus(
+          `Preferred debug port ${cfg.debugPort} is in use; using ${resolvedPort} for this run.`,
+          8000,
         );
       }
       return resolvedPort;
     } catch (error) {
       this.logger.appendLine(`TestRunCoordinator: Could not find free debug port: ${error}`);
-      void vscode.window.showWarningMessage(
-        `Spock Test Runner: Could not find a free debug port near ${cfg.debugPort}; trying configured port ${cfg.debugPort}.`,
+      showWarningStatus(
+        `Could not find a free debug port near ${cfg.debugPort}; trying configured port ${cfg.debugPort}.`,
       );
       return cfg.debugPort;
     }
@@ -1458,8 +1458,6 @@ export class TestRunCoordinator {
       return;
     }
     this.notifiedBuildFailure = true;
-    void vscode.window.showWarningMessage(
-      'Spock Test Runner: Build failed before all test results were available. Some tests are marked as errored.',
-    );
+    showWarningStatus('Build failed before all test results were available. Some tests are marked as errored.');
   }
 }
