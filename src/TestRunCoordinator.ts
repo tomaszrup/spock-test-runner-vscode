@@ -380,11 +380,7 @@ export class TestRunCoordinator {
     trackingRun: vscode.TestRun,
   ): Promise<void> {
     if (data.type === 'test') {
-      if (test.tags.some(t => t.id === 'runnable')) {
-        leafTests.push({ test, data });
-      } else {
-        trackingRun.skipped(test);
-      }
+      this.collectTestNode(test, data, leafTests, trackingRun);
       return;
     }
 
@@ -393,6 +389,29 @@ export class TestRunCoordinator {
     }
 
     test.children.forEach(child => queue.push(child));
+  }
+
+  private collectTestNode(
+    test: vscode.TestItem,
+    data: TestData,
+    leafTests: Array<{test: vscode.TestItem; data: TestData}>,
+    trackingRun: vscode.TestRun,
+  ): void {
+    if (!test.tags.some(t => t.id === 'runnable')) {
+      trackingRun.skipped(test);
+      return;
+    }
+
+    // Pre-parsed iteration items: resolve to parent data-driven method
+    if (data.isPreParsedIteration && test.parent) {
+      const parentData = this.treeManager.testData.get(test.parent);
+      if (parentData?.isDataDriven && !leafTests.some(l => l.test.id === test.parent!.id)) {
+        leafTests.push({ test: test.parent, data: parentData });
+      }
+      return;
+    }
+
+    leafTests.push({ test, data });
   }
 
   private async groupLeafTestsByProject(
@@ -897,7 +916,7 @@ export class TestRunCoordinator {
     const rootProject = await this.buildToolService.findRootProject(projectRoot, workspaceFolder.uri.fsPath);
 
     const subprojectPrefix = buildTool === 'gradle'
-      ? this.buildToolService.getSubprojectPrefix(rootProject, projectRoot)
+      ? await this.buildToolService.getSubprojectPrefix(rootProject, projectRoot)
       : this.buildToolService.getMavenModuleName(rootProject, projectRoot);
 
     if (subprojectPrefix) {

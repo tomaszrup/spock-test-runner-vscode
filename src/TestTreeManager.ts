@@ -3,12 +3,25 @@ import * as vscode from 'vscode';
 import { IBuildToolService } from './services/BuildToolService';
 import { IConfigurationService } from './services/ConfigurationService';
 import { ITestDiscoveryService } from './services/TestDiscoveryService';
-import { SpockAnnotation, TestData } from './types';
+import { SpockAnnotation, SpockAnnotationName, TestData } from './types';
 
 /**
  * Manages the VS Code TestItem tree: project/subproject/file/class/method nodes,
  * file-system watchers, and Spock test discovery.
  */
+/** Annotation names that are exposed as VS Code TestTags for filtering in Test Explorer. */
+const ANNOTATION_TAG_NAMES: SpockAnnotationName[] = [
+  'Ignore', 'PendingFeature', 'Stepwise', 'Timeout', 'Requires', 'IgnoreIf',
+];
+
+/** Pre-built TestTag instances keyed by annotation name. */
+const ANNOTATION_TAGS = new Map<string, vscode.TestTag>(
+  ANNOTATION_TAG_NAMES.map(name => [name, new vscode.TestTag(`spock:${name}`)]),
+);
+
+/** The shared 'runnable' tag used by run profiles. */
+const RUNNABLE_TAG = new vscode.TestTag('runnable');
+
 export class TestTreeManager {
   public testData = new WeakMap<vscode.TestItem, TestData>();
   public iterationItems = new Map<string, vscode.TestItem[]>();
@@ -286,7 +299,7 @@ export class TestTreeManager {
       projectUri,
     );
     projectItem.canResolveChildren = true;
-    projectItem.tags = [new vscode.TestTag('runnable')];
+    projectItem.tags = [RUNNABLE_TAG];
     this.testData.set(projectItem, { type: 'project' });
     this.controller.items.add(projectItem);
     this.projectItems.set(rootProjectPath, projectItem);
@@ -308,7 +321,7 @@ export class TestTreeManager {
       subUri,
     );
     subItem.canResolveChildren = true;
-    subItem.tags = [new vscode.TestTag('runnable')];
+    subItem.tags = [RUNNABLE_TAG];
     this.testData.set(subItem, { type: 'subproject' });
 
     const rootNode = await this.getOrCreateRootProjectNode(rootProjectPath);
@@ -412,7 +425,7 @@ export class TestTreeManager {
       packageName,
     );
     pkgItem.canResolveChildren = true;
-    pkgItem.tags = [new vscode.TestTag('runnable')];
+    pkgItem.tags = [RUNNABLE_TAG];
     this.testData.set(pkgItem, { type: 'package' });
     parentNode.children.add(pkgItem);
     this.packageItems.set(key, pkgItem);
@@ -469,10 +482,10 @@ export class TestTreeManager {
       classItem.range = testClass.range;
 
       if (classIgnored) {
-        classItem.tags = [];
+        classItem.tags = this.buildIgnoredTags(testClass.annotations);
         classItem.description = this.formatAnnotationDescription(testClass.annotations);
       } else {
-        classItem.tags = [new vscode.TestTag('runnable')];
+        classItem.tags = this.buildAnnotationTags(testClass.annotations);
         hasRunnableClasses = true;
         if (classConditional || classStepwise) {
           classItem.description = this.formatAnnotationDescription(testClass.annotations);
@@ -514,10 +527,10 @@ export class TestTreeManager {
           parentTestItem.canResolveChildren = false;
 
           if (methodIgnored) {
-            parentTestItem.tags = [];
+            parentTestItem.tags = this.buildIgnoredTags(testMethod.annotations, testClass.annotations);
             parentTestItem.description = this.formatAnnotationDescription(testMethod.annotations);
           } else {
-            parentTestItem.tags = [new vscode.TestTag('runnable')];
+            parentTestItem.tags = this.buildAnnotationTags(testMethod.annotations, testClass.annotations);
             if (methodPending || methodConditional) {
               parentTestItem.description = this.formatAnnotationDescription(testMethod.annotations);
             }
@@ -532,6 +545,11 @@ export class TestTreeManager {
             isDataDriven: true,
           });
           classItem.children.add(parentTestItem);
+
+          // Create pre-parsed iteration items when where-block data is available
+          if (testMethod.whereBlock && !methodIgnored) {
+            this.createPreParsedIterations(parentTestItem, testMethod, testClass.name, classFqn);
+          }
         } else {
           const testItem = this.controller.createTestItem(
             `${file.uri.toString()}#${testClass.name}#${testMethod.name}`,
@@ -541,10 +559,10 @@ export class TestTreeManager {
           testItem.range = testMethod.range;
 
           if (methodIgnored) {
-            testItem.tags = [];
+            testItem.tags = this.buildIgnoredTags(testMethod.annotations, testClass.annotations);
             testItem.description = this.formatAnnotationDescription(testMethod.annotations);
           } else {
-            testItem.tags = [new vscode.TestTag('runnable')];
+            testItem.tags = this.buildAnnotationTags(testMethod.annotations, testClass.annotations);
             if (methodPending || methodConditional) {
               testItem.description = this.formatAnnotationDescription(testMethod.annotations);
             }
@@ -563,7 +581,7 @@ export class TestTreeManager {
     }
 
     if (hasRunnableClasses) {
-      file.tags = [new vscode.TestTag('runnable')];
+      file.tags = [RUNNABLE_TAG];
       this.logger.debug(`File ${file.uri.fsPath} - ASSIGNED runnable tag (has runnable classes)`);
     } else if (hasAnyClasses) {
       file.tags = [];
@@ -651,6 +669,121 @@ export class TestTreeManager {
       }
       this.iterationItems.delete(fileUri);
     }
+  }
+
+  // ── Pre-parsed iteration items ──────────────────────────────────────
+
+  /**
+   * Create iteration child items from statically-parsed where-block data.
+   * These appear in the test tree before execution, giving users visibility
+   * into data-driven test cases.
+   */
+  private createPreParsedIterations(
+    parentTestItem: vscode.TestItem,
+    testMethod: { name: string; whereBlock?: { parameterNames: string[]; iterationCount: number; dataRows?: string[][] } },
+    className: string,
+    classFqn: string,
+  ): void {
+    const whereBlock = testMethod.whereBlock;
+    if (!whereBlock) { return; }
+
+    const fileUri = parentTestItem.uri?.toString() || '';
+    const newIterationItems: vscode.TestItem[] = [];
+
+    for (let i = 0; i < whereBlock.iterationCount; i++) {
+      const params = this.formatIterationParams(whereBlock, i);
+      const iterationId = `${parentTestItem.id}#iteration-${i}`;
+      const iterationLabel = `${testMethod.name} [#${i}] ${params}`;
+
+      const iterationItem = this.controller.createTestItem(
+        iterationId,
+        iterationLabel,
+        parentTestItem.uri,
+      );
+      iterationItem.range = parentTestItem.range;
+      iterationItem.tags = [RUNNABLE_TAG];
+
+      this.testData.set(iterationItem, {
+        type: 'test',
+        className,
+        classFqn,
+        testName: testMethod.name,
+        isPreParsedIteration: true,
+        iterationIndex: i,
+      });
+
+      parentTestItem.children.add(iterationItem);
+      newIterationItems.push(iterationItem);
+    }
+
+    if (newIterationItems.length > 0) {
+      this.iterationItems.set(fileUri, [
+        ...(this.iterationItems.get(fileUri) || []),
+        ...newIterationItems,
+      ]);
+      this.logger.debug(`Created ${newIterationItems.length} pre-parsed iteration items for ${testMethod.name}`);
+    }
+  }
+
+  private formatIterationParams(
+    whereBlock: { parameterNames: string[]; dataRows?: string[][] },
+    index: number,
+  ): string {
+    if (!whereBlock.dataRows?.[index]) {
+      return '';
+    }
+    return whereBlock.parameterNames
+      .map((name, col) => `${name}: ${whereBlock.dataRows![index][col]}`)
+      .join(', ');
+  }
+
+  // ── Annotation tag helpers ─────────────────────────────────────────
+
+  /**
+   * Build a tag array for a test item based on its annotations.
+   * Always includes the 'runnable' tag, plus any annotation-specific tags.
+   * Class-level annotation tags are inherited by methods via `classAnnotations`.
+   */
+  private buildAnnotationTags(
+    annotations: SpockAnnotation[] | undefined,
+    classAnnotations?: SpockAnnotation[] | undefined,
+  ): vscode.TestTag[] {
+    const tags: vscode.TestTag[] = [RUNNABLE_TAG];
+    const seen = new Set<string>();
+    for (const list of [classAnnotations, annotations]) {
+      if (!list) { continue; }
+      for (const a of list) {
+        const tag = ANNOTATION_TAGS.get(a.name);
+        if (tag && !seen.has(a.name)) {
+          seen.add(a.name);
+          tags.push(tag);
+        }
+      }
+    }
+    return tags;
+  }
+
+  /**
+   * Build a tag array for an ignored test item (no 'runnable' tag).
+   * Still includes the Ignore annotation tag for filtering purposes.
+   */
+  private buildIgnoredTags(
+    annotations: SpockAnnotation[] | undefined,
+    classAnnotations?: SpockAnnotation[] | undefined,
+  ): vscode.TestTag[] {
+    const tags: vscode.TestTag[] = [];
+    const seen = new Set<string>();
+    for (const list of [classAnnotations, annotations]) {
+      if (!list) { continue; }
+      for (const a of list) {
+        const tag = ANNOTATION_TAGS.get(a.name);
+        if (tag && !seen.has(a.name)) {
+          seen.add(a.name);
+          tags.push(tag);
+        }
+      }
+    }
+    return tags;
   }
 
   // ── Annotation formatting ──────────────────────────────────────────

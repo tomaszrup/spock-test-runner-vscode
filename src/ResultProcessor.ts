@@ -186,12 +186,7 @@ export class ResultProcessor {
       const iterationId = `${parentTest.id}#iteration-${iteration.index}`;
       const iterationLabel = `${testName} [#${iteration.index}] ${this.formatParameters(iteration.parameters)}`;
 
-      const iterationItem = this.controller.createTestItem(
-        iterationId,
-        iterationLabel,
-        parentTest.uri,
-      );
-
+      const iterationItem = this.resolveOrCreateIterationItem(parentTest, iterationId, iterationLabel);
       const iterationRange = await this.calculateIterationRange(parentTest, iteration, cachedContent);
       iterationItem.range = iterationRange;
 
@@ -202,28 +197,55 @@ export class ResultProcessor {
         isDataDriven: false,
       });
 
-      parentTest.children.add(iterationItem);
-
       newIterationItems.push(iterationItem);
-
-      if (iteration.success) {
-        run.passed(iterationItem, iteration.duration * 1000);
-      } else {
-        const message = this.createTestMessage(
-          iteration.errorInfo?.error || 'Iteration failed',
-          iteration.errorInfo?.diff,
-        );
-        if (iteration.errorInfo?.location) {
-          message.location = iteration.errorInfo.location;
-        }
-        run.failed(iterationItem, message, iteration.duration * 1000);
-      }
-
+      this.reportIterationResult(iterationItem, iteration, run);
       this.logger.appendLine(`ResultProcessor: Created flat iteration item: ${iterationLabel}`);
     }
 
     this.iterationItems.set(fileUri, newIterationItems);
     this.reportParentIterationResult(parentTest, sortedResults, run);
+  }
+
+  /**
+   * Reuse an existing pre-parsed iteration item if available, otherwise create a new one.
+   */
+  private resolveOrCreateIterationItem(
+    parentTest: vscode.TestItem,
+    iterationId: string,
+    iterationLabel: string,
+  ): vscode.TestItem {
+    let existing: vscode.TestItem | undefined;
+    parentTest.children.forEach(child => {
+      if (child.id === iterationId) { existing = child; }
+    });
+
+    if (existing) {
+      (existing as any).label = iterationLabel;
+      return existing;
+    }
+
+    const item = this.controller.createTestItem(iterationId, iterationLabel, parentTest.uri);
+    parentTest.children.add(item);
+    return item;
+  }
+
+  private reportIterationResult(
+    iterationItem: vscode.TestItem,
+    iteration: TestIterationResult,
+    run: vscode.TestRun,
+  ): void {
+    if (iteration.success) {
+      run.passed(iterationItem, iteration.duration * 1000);
+    } else {
+      const message = this.createTestMessage(
+        iteration.errorInfo?.error || 'Iteration failed',
+        iteration.errorInfo?.diff,
+      );
+      if (iteration.errorInfo?.location) {
+        message.location = iteration.errorInfo.location;
+      }
+      run.failed(iterationItem, message, iteration.duration * 1000);
+    }
   }
 
   private reportParentIterationResult(

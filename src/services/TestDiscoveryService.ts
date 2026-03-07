@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { SpockAnnotation, SpockTestClass, SpockTestMethod } from '../types';
+import { SpockAnnotation, SpockTestClass, SpockTestMethod, WhereBlockData } from '../types';
 
 /**
  * Interface for test discovery — enables mocking in tests without
@@ -188,6 +188,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
               line: i,
               range: new vscode.Range(i, 0, i, line.length),
               isDataDriven: isDataDriven,
+              whereBlock: isDataDriven ? this.parseWhereBlock(lines, i) : undefined,
               annotations: methodAnnotations.length > 0 ? methodAnnotations : undefined
             };
             currentClass.methods.push(testMethod);
@@ -449,6 +450,168 @@ export class TestDiscoveryService implements ITestDiscoveryService {
     }
     
     return false;
+  }
+
+  /**
+   * Statically parse a where-block to extract parameter names and data rows.
+   * Returns undefined if the where-block can't be parsed (dynamic expressions, etc.).
+   */
+  static parseWhereBlock(lines: string[], methodStartIndex: number): WhereBlockData | undefined {
+    const { whereLineIndex, methodEndIndex } = this.findWhereBlockBounds(lines, methodStartIndex);
+    if (whereLineIndex < 0) {
+      return undefined;
+    }
+
+    const contentLines = this.collectWhereContentLines(lines, whereLineIndex + 1, methodEndIndex);
+    if (contentLines.length === 0) {
+      return undefined;
+    }
+
+    // Try data-table format first: header row with | separators, then data rows
+    if (contentLines[0].includes('|') && !contentLines[0].includes('<<')) {
+      return this.parseDataTable(contentLines);
+    }
+
+    // Try data-pipe format: var << [values]
+    if (contentLines[0].includes('<<')) {
+      return this.parseDataPipes(contentLines);
+    }
+
+    return undefined;
+  }
+
+  private static findWhereBlockBounds(lines: string[], methodStartIndex: number): { whereLineIndex: number; methodEndIndex: number } {
+    let braceBalance = 0;
+    let foundOpeningBrace = false;
+    let whereLineIndex = -1;
+    let methodEndIndex = lines.length;
+
+    for (let j = methodStartIndex; j < lines.length; j++) {
+      const line = lines[j];
+      const trimmedLine = line.trim();
+      const delta = this.countBraceDelta(line);
+      braceBalance += delta;
+      if (delta > 0) { foundOpeningBrace = true; }
+      if (foundOpeningBrace && braceBalance <= 0) {
+        methodEndIndex = j;
+        break;
+      }
+      if (this.BLOCK_LABEL_REGEX.test(trimmedLine) && trimmedLine.includes('where')) {
+        whereLineIndex = j;
+      }
+    }
+
+    return { whereLineIndex, methodEndIndex };
+  }
+
+  private static collectWhereContentLines(lines: string[], startIndex: number, endIndex: number): string[] {
+    const contentLines: string[] = [];
+    for (let j = startIndex; j < endIndex; j++) {
+      const trimmed = lines[j].trim();
+      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed === '*/') {
+        continue;
+      }
+      if (this.BLOCK_LABEL_REGEX.test(trimmed)) {
+        break;
+      }
+      contentLines.push(trimmed);
+    }
+    return contentLines;
+  }
+
+  /**
+   * Parse a data-table style where-block:
+   *   a | b | c
+   *   1 | 2 | 3
+   *   4 | 5 | 9
+   */
+  private static parseDataTable(lines: string[]): WhereBlockData | undefined {
+    if (lines.length < 2) {
+      return undefined;
+    }
+
+    const splitRow = (line: string): string[] =>
+      line.split('|').map(cell => cell.trim()).filter(cell => cell.length > 0);
+
+    // First non-separator row is the header
+    const headerLine = lines[0].replaceAll(/^\|+|\|+$/g, '');  // strip leading/trailing pipes
+    const parameterNames = splitRow(headerLine);
+    if (parameterNames.length === 0) {
+      return undefined;
+    }
+
+    // Validate that header cells look like identifiers (not expressions)
+    if (parameterNames.some(name => !/^[a-zA-Z_]\w*$/.test(name))) {
+      return undefined;
+    }
+
+    const dataRows: string[][] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i];
+      // Skip separator lines (e.g. "---" or "||")
+      if (/^[-|_]+$/.test(line.replaceAll(/\s/g, ''))) {
+        continue;
+      }
+      const stripped = line.replaceAll(/^\|+|\|+$/g, '');
+      const cells = splitRow(stripped);
+      if (cells.length === parameterNames.length) {
+        dataRows.push(cells);
+      }
+    }
+
+    if (dataRows.length === 0) {
+      return undefined;
+    }
+
+    return {
+      parameterNames,
+      iterationCount: dataRows.length,
+      dataRows,
+    };
+  }
+
+  /**
+   * Parse a data-pipe style where-block:
+   *   a << [1, 4]
+   *   b << [2, 5]
+   *   c << [3, 9]
+   */
+  private static parseDataPipes(lines: string[]): WhereBlockData | undefined {
+    const pipes: Array<{ name: string; values: string[] }> = [];
+
+    for (const line of lines) {
+      const match = /^(\w+)\s*<<\s*\[(.*)\]\s*$/.exec(line);
+      if (!match) {
+        // If any pipe line can't be parsed (expressions, multi-line), bail out
+        return undefined;
+      }
+      const name = match[1];
+      const valuesStr = match[2];
+      const values = valuesStr.split(',').map(v => v.trim());
+      pipes.push({ name, values });
+    }
+
+    if (pipes.length === 0) {
+      return undefined;
+    }
+
+    // All pipes must have the same number of values
+    const iterationCount = pipes[0].values.length;
+    if (iterationCount === 0 || pipes.some(p => p.values.length !== iterationCount)) {
+      return undefined;
+    }
+
+    const parameterNames = pipes.map(p => p.name);
+    const dataRows: string[][] = [];
+    for (let i = 0; i < iterationCount; i++) {
+      dataRows.push(pipes.map(p => p.values[i]));
+    }
+
+    return {
+      parameterNames,
+      iterationCount,
+      dataRows,
+    };
   }
 
   // ── Instance methods (delegate to static — for DI / mocking) ───────

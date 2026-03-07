@@ -547,4 +547,190 @@ class AnnotationSpec extends Specification {
       expect(ignored?.annotations?.filter(a => a.name === 'Ignore')).toHaveLength(1);
     });
   });
+
+  // ── parseWhereBlock ────────────────────────────────────────────────
+
+  describe('parseWhereBlock', () => {
+    it('should parse a data-table where-block', () => {
+      const content = `
+class Spec extends Specification {
+    def "add numbers"() {
+        expect:
+        a + b == c
+
+        where:
+        a | b | c
+        1 | 2 | 3
+        4 | 5 | 9
+    }
+}`;
+      const lines = content.split('\n');
+      // method starts at line 2 (0-indexed)
+      const result = TestDiscoveryService.parseWhereBlock(lines, 2);
+      expect(result).toBeDefined();
+      expect(result!.parameterNames).toEqual(['a', 'b', 'c']);
+      expect(result!.iterationCount).toBe(2);
+      expect(result!.dataRows).toEqual([['1', '2', '3'], ['4', '5', '9']]);
+    });
+
+    it('should parse a data-table with leading/trailing pipes', () => {
+      const content = `
+class Spec extends Specification {
+    def "test"() {
+        expect:
+        a + b == c
+
+        where:
+        | a | b | c |
+        | 1 | 2 | 3 |
+        | 4 | 5 | 9 |
+    }
+}`;
+      const lines = content.split('\n');
+      const result = TestDiscoveryService.parseWhereBlock(lines, 2);
+      expect(result).toBeDefined();
+      expect(result!.parameterNames).toEqual(['a', 'b', 'c']);
+      expect(result!.iterationCount).toBe(2);
+    });
+
+    it('should parse a data-table with separator lines', () => {
+      const content = `
+class Spec extends Specification {
+    def "test"() {
+        expect:
+        a + b == c
+
+        where:
+        a | b || c
+        1 | 2 || 3
+        ------||---
+        4 | 5 || 9
+    }
+}`;
+      const lines = content.split('\n');
+      const result = TestDiscoveryService.parseWhereBlock(lines, 2);
+      expect(result).toBeDefined();
+      expect(result!.iterationCount).toBe(2);
+    });
+
+    it('should parse data-pipe where-block', () => {
+      const content = `
+class Spec extends Specification {
+    def "test"() {
+        expect:
+        a + b == c
+
+        where:
+        a << [1, 4]
+        b << [2, 5]
+        c << [3, 9]
+    }
+}`;
+      const lines = content.split('\n');
+      const result = TestDiscoveryService.parseWhereBlock(lines, 2);
+      expect(result).toBeDefined();
+      expect(result!.parameterNames).toEqual(['a', 'b', 'c']);
+      expect(result!.iterationCount).toBe(2);
+      expect(result!.dataRows).toEqual([['1', '2', '3'], ['4', '5', '9']]);
+    });
+
+    it('should skip comments in where-block', () => {
+      const content = `
+class Spec extends Specification {
+    def "test"() {
+        expect:
+        a + b == c
+
+        where:
+        // header comment
+        a | b | c
+        // first row
+        1 | 2 | 3
+        4 | 5 | 9
+    }
+}`;
+      const lines = content.split('\n');
+      const result = TestDiscoveryService.parseWhereBlock(lines, 2);
+      expect(result).toBeDefined();
+      expect(result!.iterationCount).toBe(2);
+    });
+
+    it('should return undefined for dynamic expressions in pipes', () => {
+      const content = `
+class Spec extends Specification {
+    def "test"() {
+        expect:
+        result == expected
+
+        where:
+        input << generateInputs()
+        expected << computeExpected(input)
+    }
+}`;
+      const lines = content.split('\n');
+      const result = TestDiscoveryService.parseWhereBlock(lines, 2);
+      expect(result).toBeUndefined();
+    });
+
+    it('should return undefined for method without where-block', () => {
+      const content = `
+class Spec extends Specification {
+    def "test"() {
+        expect:
+        1 + 1 == 2
+    }
+}`;
+      const lines = content.split('\n');
+      const result = TestDiscoveryService.parseWhereBlock(lines, 2);
+      expect(result).toBeUndefined();
+    });
+
+    it('should return undefined when header has non-identifier names', () => {
+      const content = `
+class Spec extends Specification {
+    def "test"() {
+        expect:
+        true
+
+        where:
+        a + 1 | b * 2 | c
+        1     | 2     | 3
+    }
+}`;
+      const lines = content.split('\n');
+      const result = TestDiscoveryService.parseWhereBlock(lines, 2);
+      expect(result).toBeUndefined();
+    });
+
+    it('should populate whereBlock on data-driven methods during parseTestsInFile', () => {
+      const content = `
+class MySpec extends Specification {
+    def "add numbers"() {
+        expect:
+        a + b == c
+
+        where:
+        a | b | c
+        1 | 2 | 3
+        4 | 5 | 9
+    }
+
+    def "simple test"() {
+        expect:
+        true
+    }
+}`;
+      const classes = TestDiscoveryService.parseTestsInFile(content);
+      expect(classes).toHaveLength(1);
+      const dataDriven = classes[0].methods.find(m => m.name === 'add numbers');
+      expect(dataDriven?.isDataDriven).toBe(true);
+      expect(dataDriven?.whereBlock).toBeDefined();
+      expect(dataDriven?.whereBlock?.parameterNames).toEqual(['a', 'b', 'c']);
+      expect(dataDriven?.whereBlock?.iterationCount).toBe(2);
+
+      const simple = classes[0].methods.find(m => m.name === 'simple test');
+      expect(simple?.isDataDriven).toBe(false);
+      expect(simple?.whereBlock).toBeUndefined();
+    });
+  });
 });

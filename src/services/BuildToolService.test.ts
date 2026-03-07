@@ -173,6 +173,109 @@ describe('BuildToolService', () => {
     });
   });
 
+  // ── parseSettingsGradleProjectDirs ─────────────────────────────────
+
+  describe('parseSettingsGradleProjectDirs', () => {
+    it('should parse simple include statements', () => {
+      const content = `
+rootProject.name = 'my-project'
+include 'moduleA', 'moduleB'
+`;
+      const map = BuildToolService.parseSettingsGradleProjectDirs(content, '/root');
+      expect(map.get(path.resolve('/root', 'moduleA'))).toBe(':moduleA');
+      expect(map.get(path.resolve('/root', 'moduleB'))).toBe(':moduleB');
+    });
+
+    it('should parse include with parentheses (Kotlin DSL)', () => {
+      const content = `
+rootProject.name = "my-project"
+include("moduleA", "moduleB")
+`;
+      const map = BuildToolService.parseSettingsGradleProjectDirs(content, '/root');
+      expect(map.get(path.resolve('/root', 'moduleA'))).toBe(':moduleA');
+      expect(map.get(path.resolve('/root', 'moduleB'))).toBe(':moduleB');
+    });
+
+    it('should parse projectDir overrides', () => {
+      const content = `
+rootProject.name = 'my-project'
+include 'commons-alpha', 'commons-beta'
+project(':commons-alpha').projectDir = file('commons/commons-alpha')
+project(':commons-beta').projectDir = file('commons/commons-beta')
+`;
+      const map = BuildToolService.parseSettingsGradleProjectDirs(content, '/root');
+      expect(map.get(path.resolve('/root', 'commons', 'commons-alpha'))).toBe(':commons-alpha');
+      expect(map.get(path.resolve('/root', 'commons', 'commons-beta'))).toBe(':commons-beta');
+    });
+
+    it('should handle colon-delimited nested includes without overrides', () => {
+      const content = `include 'parent:child'`;
+      const map = BuildToolService.parseSettingsGradleProjectDirs(content, '/root');
+      expect(map.get(path.resolve('/root', 'parent', 'child'))).toBe(':parent:child');
+    });
+
+    it('should handle multiple include lines', () => {
+      const content = `
+include 'alpha'
+include 'beta'
+include 'gamma'
+`;
+      const map = BuildToolService.parseSettingsGradleProjectDirs(content, '/root');
+      expect(map.size).toBe(3);
+      expect(map.get(path.resolve('/root', 'alpha'))).toBe(':alpha');
+    });
+  });
+
+  // ── resolveSubprojectPrefix ───────────────────────────────────────
+
+  describe('resolveSubprojectPrefix', () => {
+    it('should return empty string when subproject is root', async () => {
+      expect(await BuildToolService.resolveSubprojectPrefix('/root', '/root')).toBe('');
+    });
+
+    it('should resolve using projectDir overrides from settings.gradle', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (String(p).endsWith('settings.gradle')) return;
+        throw new Error('ENOENT');
+      });
+      mockedFs.promises.readFile.mockResolvedValue(`
+rootProject.name = 'sample'
+include 'commons-beta'
+project(':commons-beta').projectDir = file('commons/commons-beta')
+`);
+      const result = await BuildToolService.resolveSubprojectPrefix(
+        '/root',
+        path.join('/root', 'commons', 'commons-beta')
+      );
+      expect(result).toBe(':commons-beta');
+    });
+
+    it('should fall back to filesystem path when no settings.gradle', async () => {
+      mockedFs.promises.access.mockRejectedValue(new Error('ENOENT'));
+      const result = await BuildToolService.resolveSubprojectPrefix(
+        '/root',
+        path.join('/root', 'commons', 'commons-beta')
+      );
+      expect(result).toBe(':commons:commons-beta');
+    });
+
+    it('should fall back to filesystem path when project not found in settings', async () => {
+      mockedFs.promises.access.mockImplementation(async (p: fs.PathLike) => {
+        if (String(p).endsWith('settings.gradle')) return;
+        throw new Error('ENOENT');
+      });
+      mockedFs.promises.readFile.mockResolvedValue(`
+rootProject.name = 'sample'
+include 'other-module'
+`);
+      const result = await BuildToolService.resolveSubprojectPrefix(
+        '/root',
+        path.join('/root', 'commons', 'commons-beta')
+      );
+      expect(result).toBe(':commons:commons-beta');
+    });
+  });
+
   // ── getProjectName ────────────────────────────────────────────────
 
   describe('getProjectName', () => {

@@ -92,7 +92,7 @@ function createMockBuildToolService() {
     findProjectRoot: vi.fn().mockResolvedValue('/workspace/project'),
     findRootProject: vi.fn().mockResolvedValue('/workspace/project'),
     getProjectName: vi.fn().mockResolvedValue('test-project'),
-    getSubprojectPrefix: vi.fn().mockReturnValue(''),
+    getSubprojectPrefix: vi.fn().mockResolvedValue(''),
     getMavenModuleName: vi.fn().mockReturnValue(''),
     buildCommandArgs: vi.fn().mockResolvedValue(['gradle', 'test']),
     buildBatchCommandArgs: vi.fn().mockResolvedValue(['gradle', 'test']),

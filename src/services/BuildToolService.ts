@@ -159,7 +159,7 @@ export interface IBuildToolService {
   findProjectRoot(filePath: string, workspaceRoot: string): Promise<string | null>;
   findRootProject(projectPath: string, workspaceRoot: string): Promise<string>;
   getProjectName(workspacePath: string): Promise<string>;
-  getSubprojectPrefix(rootProject: string, subprojectPath: string): string;
+  getSubprojectPrefix(rootProject: string, subprojectPath: string): Promise<string>;
   getMavenModuleName(rootProject: string, submodulePath: string): string;
   buildCommandArgs(testName: string, debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, buildTool?: BuildTool, debugPort?: number): Promise<string[]>;
   buildBatchCommandArgs(testFilters: string[], debug: boolean, workspacePath?: string, logger?: vscode.OutputChannel, subprojectPrefix?: string, options?: BatchCommandOptions): Promise<string[]>;
@@ -342,6 +342,103 @@ export class BuildToolService {
     // Convert OS path separators to Gradle colon notation
     const gradlePath = relativePath.split(path.sep).join(':');
     return `:${gradlePath}`;
+  }
+
+  /**
+   * Resolve the Gradle subproject prefix by consulting settings.gradle.
+   *
+   * Gradle projects can define custom `projectDir` mappings that cause the
+   * logical project path (used in task names like `:commons-beta:test`) to
+   * differ from the filesystem layout (e.g. `commons/commons-beta/`).
+   *
+   * This method parses `include` declarations and optional `projectDir`
+   * overrides from `settings.gradle` / `settings.gradle.kts` to determine
+   * the correct Gradle project path.  Falls back to the filesystem-based
+   * {@link getSubprojectPrefix} when no mapping is found.
+   */
+  static async resolveSubprojectPrefix(rootProject: string, subprojectPath: string): Promise<string> {
+    const normalizedRoot = path.resolve(rootProject);
+    const normalizedSub  = path.resolve(subprojectPath);
+
+    if (normalizedRoot === normalizedSub) {
+      return '';
+    }
+
+    const settingsPath = path.join(rootProject, 'settings.gradle');
+    const settingsKtsPath = path.join(rootProject, 'settings.gradle.kts');
+    const actualPath = await fileExists(settingsPath) ? settingsPath : settingsKtsPath;
+    const content = await this.readFileIfExists(actualPath);
+
+    if (content) {
+      const mapping = this.parseSettingsGradleProjectDirs(content, rootProject);
+      const resolved = mapping.get(normalizedSub);
+      if (resolved !== undefined) {
+        return resolved;
+      }
+    }
+
+    // Fall back to filesystem-based derivation
+    return this.getSubprojectPrefix(rootProject, subprojectPath);
+  }
+
+  /**
+   * Parse a settings.gradle / settings.gradle.kts file to build a map
+   * of absolute filesystem path → Gradle project prefix (e.g. `:commons-beta`).
+   *
+   * Handles:
+   *  - `include 'a', 'b'`  /  `include('a', 'b')`  (Groovy & Kotlin DSL)
+   *  - `project(':a').projectDir = file('custom/path')`  (projectDir overrides)
+   */
+  static parseSettingsGradleProjectDirs(
+    content: string,
+    rootProject: string,
+  ): Map<string, string> {
+    const normalizedRoot = path.resolve(rootProject);
+    // Map: Gradle project name (e.g. 'commons-beta') → Gradle prefix (e.g. ':commons-beta')
+    const projectNames: string[] = [];
+    // Map: Gradle project name → resolved absolute directory
+    const projectDirOverrides = new Map<string, string>();
+
+    // ── Parse include statements ────────────────────────────────────
+    // Matches: include 'a', "b"  |  include('a', 'b')  |  include("a")
+    const includeRegex = /include\s*\(?\s*(['"][^)\n]*)/g;
+    let match: RegExpExecArray | null;
+    while ((match = includeRegex.exec(content)) !== null) {
+      // Extract individual quoted project names from the matched group
+      const namesStr = match[1];
+      const nameRegex = /['"]([^'"]+)['"]/g;
+      let nameMatch: RegExpExecArray | null;
+      while ((nameMatch = nameRegex.exec(namesStr)) !== null) {
+        projectNames.push(nameMatch[1]);
+      }
+    }
+
+    // ── Parse projectDir overrides ──────────────────────────────────
+    // Matches: project(':name').projectDir = file('path')
+    //          project(":name").projectDir = file("path")
+    const projDirRegex = /project\s*\(\s*['"][:.]?([^'"]+)['"]\s*\)\.projectDir\s*=\s*file\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+    while ((match = projDirRegex.exec(content)) !== null) {
+      const projectName = match[1];
+      const dirPath = match[2];
+      projectDirOverrides.set(projectName, path.resolve(normalizedRoot, dirPath));
+    }
+
+    // ── Build the filesystem-path → Gradle-prefix map ───────────────
+    const result = new Map<string, string>();
+    for (const name of projectNames) {
+      const prefix = `:${name}`;
+      const override = projectDirOverrides.get(name);
+      if (override) {
+        // Custom projectDir declared
+        result.set(path.resolve(override), prefix);
+      } else {
+        // Default convention: colons map to path separators
+        const defaultDir = path.resolve(normalizedRoot, ...name.split(':'));
+        result.set(defaultDir, prefix);
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -1125,8 +1222,8 @@ export class BuildToolService {
   async getProjectName(workspacePath: string): Promise<string> {
     return BuildToolService.getProjectName(workspacePath);
   }
-  getSubprojectPrefix(rootProject: string, subprojectPath: string): string {
-    return BuildToolService.getSubprojectPrefix(rootProject, subprojectPath);
+  async getSubprojectPrefix(rootProject: string, subprojectPath: string): Promise<string> {
+    return BuildToolService.resolveSubprojectPrefix(rootProject, subprojectPath);
   }
   getMavenModuleName(rootProject: string, submodulePath: string): string {
     return BuildToolService.getMavenModuleName(rootProject, submodulePath);

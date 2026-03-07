@@ -47,7 +47,7 @@ function createMockBuildToolService() {
     findProjectRoot: vi.fn().mockResolvedValue('/workspace/project'),
     findRootProject: vi.fn().mockResolvedValue('/workspace/project'),
     getProjectName: vi.fn().mockResolvedValue('test-project'),
-    getSubprojectPrefix: vi.fn().mockReturnValue(''),
+    getSubprojectPrefix: vi.fn().mockResolvedValue(''),
     getMavenModuleName: vi.fn().mockReturnValue(''),
     buildCommandArgs: vi.fn().mockResolvedValue(['gradle', 'test']),
     buildBatchCommandArgs: vi.fn().mockResolvedValue(['gradle', 'test']),
@@ -596,15 +596,15 @@ describe('TestTreeManager', () => {
   describe('formatAnnotationDescription', () => {
     it('should format display-worthy annotations', () => {
       const result = manager.formatAnnotationDescription([
-        { name: 'Ignore', argument: undefined },
-        { name: 'Issue', argument: '"PROJ-123"' },
+        { name: 'Ignore', argument: undefined, line: 0 },
+        { name: 'Issue', argument: '"PROJ-123"', line: 1 },
       ]);
       expect(result).toBe('@Ignore @Issue("PROJ-123")');
     });
 
     it('should skip non-display annotations', () => {
       const result = manager.formatAnnotationDescription([
-        { name: 'Unroll', argument: undefined },
+        { name: 'Unroll', argument: undefined, line: 0 },
       ]);
       expect(result).toBe('');
     });
@@ -612,6 +612,398 @@ describe('TestTreeManager', () => {
     it('should return empty string for undefined/empty', () => {
       expect(manager.formatAnnotationDescription(undefined)).toBe('');
       expect(manager.formatAnnotationDescription([])).toBe('');
+    });
+  });
+
+  // ── Annotation-based test tags ────────────────────────────────────
+
+  describe('annotation tags', () => {
+    it('should add annotation-specific tags alongside runnable for class annotations', () => {
+      const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/StepSpec.groovy');
+      const file = controller.createTestItem(fileUri.toString(), 'StepSpec.groovy', fileUri);
+      manager.testData.set(file, { type: 'file' });
+
+      testDiscoveryService.hasAnnotation.mockImplementation(
+        (annotations: any, name: string) => annotations?.some((a: any) => a.name === name),
+      );
+
+      testDiscoveryService.parseTestsInFile.mockReturnValue([
+        {
+          name: 'StepSpec',
+          range: new vscode.Range(0, 0, 10, 0),
+          isAbstract: false,
+          annotations: [{ name: 'Stepwise', line: 0 }],
+          methods: [
+            { name: 'step one', range: new vscode.Range(2, 0, 4, 0), isDataDriven: false, annotations: [] },
+          ],
+        },
+      ]);
+
+      manager.parseTestsInFile(file, '@Stepwise class StepSpec extends Specification {}');
+
+      let classNode: any;
+      file.children.forEach((child: any) => { classNode = child; });
+
+      // Class should have runnable + spock:Stepwise
+      expect(classNode.tags.some((t: any) => t.id === 'runnable')).toBe(true);
+      expect(classNode.tags.some((t: any) => t.id === 'spock:Stepwise')).toBe(true);
+
+      // Child method should inherit class annotation tag
+      let methodNode: any;
+      classNode.children.forEach((child: any) => { methodNode = child; });
+      expect(methodNode.tags.some((t: any) => t.id === 'runnable')).toBe(true);
+      expect(methodNode.tags.some((t: any) => t.id === 'spock:Stepwise')).toBe(true);
+    });
+
+    it('should add annotation tags for method-level annotations', () => {
+      const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/TimeoutSpec.groovy');
+      const file = controller.createTestItem(fileUri.toString(), 'TimeoutSpec.groovy', fileUri);
+      manager.testData.set(file, { type: 'file' });
+
+      testDiscoveryService.hasAnnotation.mockImplementation(
+        (annotations: any, name: string) => annotations?.some((a: any) => a.name === name),
+      );
+
+      testDiscoveryService.parseTestsInFile.mockReturnValue([
+        {
+          name: 'TimeoutSpec',
+          range: new vscode.Range(0, 0, 10, 0),
+          isAbstract: false,
+          annotations: [],
+          methods: [
+            { name: 'slow test', range: new vscode.Range(2, 0, 5, 0), isDataDriven: false, annotations: [{ name: 'Timeout', argument: '10', line: 1 }] },
+            { name: 'fast test', range: new vscode.Range(6, 0, 9, 0), isDataDriven: false, annotations: [] },
+          ],
+        },
+      ]);
+
+      manager.parseTestsInFile(file, 'class TimeoutSpec extends Specification {}');
+
+      const methods: any[] = [];
+      file.children.forEach((cls: any) => cls.children.forEach((m: any) => { methods.push(m); }));
+
+      // 'slow test' should have Timeout tag
+      const slowTest = methods.find((m: any) => m.label === 'slow test');
+      expect(slowTest.tags.some((t: any) => t.id === 'spock:Timeout')).toBe(true);
+      expect(slowTest.tags.some((t: any) => t.id === 'runnable')).toBe(true);
+
+      // 'fast test' should have only runnable tag
+      const fastTest = methods.find((m: any) => m.label === 'fast test');
+      expect(fastTest.tags.some((t: any) => t.id === 'spock:Timeout')).toBe(false);
+      expect(fastTest.tags.some((t: any) => t.id === 'runnable')).toBe(true);
+    });
+
+    it('should add Ignore tag to ignored items without runnable tag', () => {
+      const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/IgnoredSpec.groovy');
+      const file = controller.createTestItem(fileUri.toString(), 'IgnoredSpec.groovy', fileUri);
+      manager.testData.set(file, { type: 'file' });
+
+      testDiscoveryService.hasAnnotation.mockImplementation(
+        (annotations: any, name: string) => name === 'Ignore' && annotations?.some((a: any) => a.name === 'Ignore'),
+      );
+
+      testDiscoveryService.parseTestsInFile.mockReturnValue([
+        {
+          name: 'IgnoredSpec',
+          range: new vscode.Range(0, 0, 10, 0),
+          isAbstract: false,
+          annotations: [{ name: 'Ignore', line: 0 }],
+          methods: [
+            { name: 'test one', range: new vscode.Range(2, 0, 5, 0), isDataDriven: false, annotations: [] },
+          ],
+        },
+      ]);
+
+      manager.parseTestsInFile(file, '@Ignore class IgnoredSpec extends Specification {}');
+
+      let classNode: any;
+      file.children.forEach((child: any) => { classNode = child; });
+
+      // Class should have Ignore tag but NOT runnable
+      expect(classNode.tags.some((t: any) => t.id === 'runnable')).toBe(false);
+      expect(classNode.tags.some((t: any) => t.id === 'spock:Ignore')).toBe(true);
+
+      // Child method inherits: Ignore tag, no runnable
+      let methodNode: any;
+      classNode.children.forEach((child: any) => { methodNode = child; });
+      expect(methodNode.tags.some((t: any) => t.id === 'runnable')).toBe(false);
+      expect(methodNode.tags.some((t: any) => t.id === 'spock:Ignore')).toBe(true);
+    });
+
+    it('should add annotation tags to data-driven methods', () => {
+      const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/DataSpec.groovy');
+      const file = controller.createTestItem(fileUri.toString(), 'DataSpec.groovy', fileUri);
+      manager.testData.set(file, { type: 'file' });
+
+      testDiscoveryService.hasAnnotation.mockImplementation(
+        (annotations: any, name: string) => annotations?.some((a: any) => a.name === name),
+      );
+
+      testDiscoveryService.parseTestsInFile.mockReturnValue([
+        {
+          name: 'DataSpec',
+          range: new vscode.Range(0, 0, 10, 0),
+          isAbstract: false,
+          annotations: [],
+          methods: [
+            {
+              name: 'add #a + #b',
+              range: new vscode.Range(2, 0, 8, 0),
+              isDataDriven: true,
+              annotations: [{ name: 'Timeout', argument: '5', line: 1 }],
+            },
+          ],
+        },
+      ]);
+
+      manager.parseTestsInFile(file, 'class DataSpec extends Specification {}');
+
+      let methodNode: any;
+      file.children.forEach((cls: any) => cls.children.forEach((m: any) => { methodNode = m; }));
+      expect(methodNode.tags.some((t: any) => t.id === 'runnable')).toBe(true);
+      expect(methodNode.tags.some((t: any) => t.id === 'spock:Timeout')).toBe(true);
+    });
+
+    it('should not duplicate tags when class and method share the same annotation', () => {
+      const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/DupSpec.groovy');
+      const file = controller.createTestItem(fileUri.toString(), 'DupSpec.groovy', fileUri);
+      manager.testData.set(file, { type: 'file' });
+
+      testDiscoveryService.hasAnnotation.mockImplementation(
+        (annotations: any, name: string) => annotations?.some((a: any) => a.name === name),
+      );
+
+      testDiscoveryService.parseTestsInFile.mockReturnValue([
+        {
+          name: 'DupSpec',
+          range: new vscode.Range(0, 0, 10, 0),
+          isAbstract: false,
+          annotations: [{ name: 'Timeout', argument: '10', line: 0 }],
+          methods: [
+            {
+              name: 'test one',
+              range: new vscode.Range(2, 0, 5, 0),
+              isDataDriven: false,
+              annotations: [{ name: 'Timeout', argument: '5', line: 1 }],
+            },
+          ],
+        },
+      ]);
+
+      manager.parseTestsInFile(file, '@Timeout(10) class DupSpec extends Specification {}');
+
+      let methodNode: any;
+      file.children.forEach((cls: any) => cls.children.forEach((m: any) => { methodNode = m; }));
+      const timeoutTags = methodNode.tags.filter((t: any) => t.id === 'spock:Timeout');
+      expect(timeoutTags).toHaveLength(1);
+    });
+
+    it('should handle PendingFeature annotation tag', () => {
+      const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/PendingSpec.groovy');
+      const file = controller.createTestItem(fileUri.toString(), 'PendingSpec.groovy', fileUri);
+      manager.testData.set(file, { type: 'file' });
+
+      testDiscoveryService.hasAnnotation.mockImplementation(
+        (annotations: any, name: string) => annotations?.some((a: any) => a.name === name),
+      );
+
+      testDiscoveryService.parseTestsInFile.mockReturnValue([
+        {
+          name: 'PendingSpec',
+          range: new vscode.Range(0, 0, 10, 0),
+          isAbstract: false,
+          annotations: [],
+          methods: [
+            {
+              name: 'future feature',
+              range: new vscode.Range(2, 0, 5, 0),
+              isDataDriven: false,
+              annotations: [{ name: 'PendingFeature', line: 1 }],
+            },
+          ],
+        },
+      ]);
+
+      manager.parseTestsInFile(file, 'class PendingSpec extends Specification {}');
+
+      let methodNode: any;
+      file.children.forEach((cls: any) => cls.children.forEach((m: any) => { methodNode = m; }));
+      expect(methodNode.tags.some((t: any) => t.id === 'spock:PendingFeature')).toBe(true);
+      expect(methodNode.tags.some((t: any) => t.id === 'runnable')).toBe(true);
+    });
+  });
+
+  // ── Pre-parsed iteration items ──────────────────────────────────
+
+  describe('pre-parsed iteration items', () => {
+    it('should create iteration children from whereBlock data', () => {
+      const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/DataSpec.groovy');
+      const file = controller.createTestItem(fileUri.toString(), 'DataSpec.groovy', fileUri);
+      manager.testData.set(file, { type: 'file' });
+
+      testDiscoveryService.hasAnnotation.mockReturnValue(false);
+
+      testDiscoveryService.parseTestsInFile.mockReturnValue([
+        {
+          name: 'DataSpec',
+          range: new vscode.Range(0, 0, 20, 0),
+          isAbstract: false,
+          annotations: [],
+          methods: [
+            {
+              name: 'add #a + #b',
+              range: new vscode.Range(2, 0, 12, 0),
+              isDataDriven: true,
+              annotations: [],
+              whereBlock: {
+                parameterNames: ['a', 'b', 'c'],
+                iterationCount: 2,
+                dataRows: [['1', '2', '3'], ['4', '5', '9']],
+              },
+            },
+          ],
+        },
+      ]);
+
+      manager.parseTestsInFile(file, 'class DataSpec extends Specification {}');
+
+      // Find the parent data-driven method
+      let parentMethod: any;
+      file.children.forEach((cls: any) => cls.children.forEach((m: any) => { parentMethod = m; }));
+      expect(parentMethod).toBeDefined();
+
+      // Should have 2 iteration children
+      let iterations: any[] = [];
+      parentMethod.children.forEach((iter: any) => { iterations.push(iter); });
+      expect(iterations).toHaveLength(2);
+
+      // First iteration
+      expect(iterations[0].label).toBe('add #a + #b [#0] a: 1, b: 2, c: 3');
+      expect(iterations[0].tags.some((t: any) => t.id === 'runnable')).toBe(true);
+      const data0 = manager.testData.get(iterations[0]);
+      expect(data0?.isPreParsedIteration).toBe(true);
+      expect(data0?.iterationIndex).toBe(0);
+      expect(data0?.testName).toBe('add #a + #b');
+
+      // Second iteration
+      expect(iterations[1].label).toBe('add #a + #b [#1] a: 4, b: 5, c: 9');
+      const data1 = manager.testData.get(iterations[1]);
+      expect(data1?.isPreParsedIteration).toBe(true);
+      expect(data1?.iterationIndex).toBe(1);
+    });
+
+    it('should not create iterations when whereBlock is absent', () => {
+      const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/DataSpec2.groovy');
+      const file = controller.createTestItem(fileUri.toString(), 'DataSpec2.groovy', fileUri);
+      manager.testData.set(file, { type: 'file' });
+
+      testDiscoveryService.hasAnnotation.mockReturnValue(false);
+
+      testDiscoveryService.parseTestsInFile.mockReturnValue([
+        {
+          name: 'DataSpec2',
+          range: new vscode.Range(0, 0, 10, 0),
+          isAbstract: false,
+          annotations: [],
+          methods: [
+            {
+              name: 'dynamic test',
+              range: new vscode.Range(2, 0, 8, 0),
+              isDataDriven: true,
+              annotations: [],
+              // No whereBlock (couldn't be parsed statically)
+            },
+          ],
+        },
+      ]);
+
+      manager.parseTestsInFile(file, 'class DataSpec2 extends Specification {}');
+
+      let parentMethod: any;
+      file.children.forEach((cls: any) => cls.children.forEach((m: any) => { parentMethod = m; }));
+      expect(parentMethod).toBeDefined();
+
+      let count = 0;
+      parentMethod.children.forEach(() => { count++; });
+      expect(count).toBe(0);
+    });
+
+    it('should not create iterations for ignored data-driven methods', () => {
+      const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/IgnoredData.groovy');
+      const file = controller.createTestItem(fileUri.toString(), 'IgnoredData.groovy', fileUri);
+      manager.testData.set(file, { type: 'file' });
+
+      testDiscoveryService.hasAnnotation.mockImplementation(
+        (annotations: any, name: string) => name === 'Ignore' && annotations?.some((a: any) => a.name === 'Ignore'),
+      );
+
+      testDiscoveryService.parseTestsInFile.mockReturnValue([
+        {
+          name: 'IgnoredData',
+          range: new vscode.Range(0, 0, 20, 0),
+          isAbstract: false,
+          annotations: [{ name: 'Ignore', line: 0 }],
+          methods: [
+            {
+              name: 'data test',
+              range: new vscode.Range(2, 0, 12, 0),
+              isDataDriven: true,
+              annotations: [],
+              whereBlock: {
+                parameterNames: ['a', 'b'],
+                iterationCount: 2,
+                dataRows: [['1', '2'], ['3', '4']],
+              },
+            },
+          ],
+        },
+      ]);
+
+      manager.parseTestsInFile(file, '@Ignore class IgnoredData extends Specification {}');
+
+      let parentMethod: any;
+      file.children.forEach((cls: any) => cls.children.forEach((m: any) => { parentMethod = m; }));
+      expect(parentMethod).toBeDefined();
+
+      let count = 0;
+      parentMethod.children.forEach(() => { count++; });
+      expect(count).toBe(0);
+    });
+
+    it('should track iteration items in iterationItems map', () => {
+      const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/Tracked.groovy');
+      const file = controller.createTestItem(fileUri.toString(), 'Tracked.groovy', fileUri);
+      manager.testData.set(file, { type: 'file' });
+
+      testDiscoveryService.hasAnnotation.mockReturnValue(false);
+
+      testDiscoveryService.parseTestsInFile.mockReturnValue([
+        {
+          name: 'Tracked',
+          range: new vscode.Range(0, 0, 10, 0),
+          isAbstract: false,
+          annotations: [],
+          methods: [
+            {
+              name: 'test data',
+              range: new vscode.Range(2, 0, 8, 0),
+              isDataDriven: true,
+              annotations: [],
+              whereBlock: {
+                parameterNames: ['x'],
+                iterationCount: 3,
+                dataRows: [['1'], ['2'], ['3']],
+              },
+            },
+          ],
+        },
+      ]);
+
+      manager.parseTestsInFile(file, 'class Tracked extends Specification {}');
+
+      const iterItems = manager.iterationItems.get(fileUri.toString());
+      expect(iterItems).toBeDefined();
+      expect(iterItems).toHaveLength(3);
     });
   });
 

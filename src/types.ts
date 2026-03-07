@@ -36,6 +36,10 @@ export interface TestData {
   testName?: string;
   isDataDriven?: boolean;
   iterationResults?: TestIterationResult[];
+  /** True for pre-parsed iteration items created during discovery. */
+  isPreParsedIteration?: boolean;
+  /** 0-based iteration index for pre-parsed iteration items. */
+  iterationIndex?: number;
 }
 
 export interface DiffInfo {
@@ -85,8 +89,23 @@ export interface SpockTestMethod {
   isDataDriven?: boolean;
   dataIterations?: SpockDataIteration[];
   whereBlockRange?: vscode.Range;
+  /** Statically-parsed where-block data from discovery (before execution). */
+  whereBlock?: WhereBlockData;
   /** Annotations found directly above this method */
   annotations?: SpockAnnotation[];
+}
+
+/**
+ * Statically-parsed where-block data extracted during test discovery.
+ * Used to pre-populate iteration items in the test tree before execution.
+ */
+export interface WhereBlockData {
+  /** Column / variable names from the data table or data pipes. */
+  parameterNames: string[];
+  /** Number of data rows (iterations). */
+  iterationCount: number;
+  /** Raw data row values, one array per iteration. Order matches parameterNames. */
+  dataRows?: string[][];
 }
 
 export interface SpockDataIteration {
