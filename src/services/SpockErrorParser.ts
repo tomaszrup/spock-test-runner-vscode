@@ -219,10 +219,18 @@ export function extractErrorForTest(output: string, className: string, testName:
       continue;
     }
     if (capturingCondition) {
-      if (/^\s+/.exec(line) && !line.trim().startsWith('at ')) {
+      const isStackTraceLine = trimmed.startsWith('at ') || /^Caused by:\s+/i.test(trimmed) || /^\.\.\.\s+\d+\s+more$/.test(trimmed);
+      if (trimmed.length === 0) {
+        conditionBlock.push('');
+        continue;
+      }
+      if (/^\s+/.exec(line) && !isStackTraceLine) {
         conditionBlock.push(line.trimEnd());
         continue;
       } else {
+        while (conditionBlock.length > 0 && conditionBlock.at(-1)?.trim() === '') {
+          conditionBlock.pop();
+        }
         capturingCondition = false;
       }
     }
@@ -254,6 +262,10 @@ export function extractErrorForTest(output: string, className: string, testName:
         causeLine = trimmed;
       }
     }
+  }
+
+  while (conditionBlock.length > 0 && conditionBlock.at(-1)?.trim() === '') {
+    conditionBlock.pop();
   }
 
   // Build the error message

@@ -82,6 +82,26 @@ describe('SpockErrorParser', () => {
       expect(result).toContain('Condition not satisfied');
     });
 
+    it('should keep power assertion lines when a blank line follows the condition header', () => {
+      const output = [
+        'MySpec > should add FAILED',
+        'Condition not satisfied:',
+        '',
+        '  result == expected',
+        '  |      |  |',
+        '  4      |  5',
+        '         false',
+        '',
+        '  at MySpec.should add(MySpec.groovy:10)',
+      ].join('\n');
+
+      const result = extractErrorForTest(output, 'MySpec', 'should add');
+      expect(result).toContain('Condition not satisfied:');
+      expect(result).toContain('result == expected');
+      expect(result).toContain('4      |  5');
+      expect(result).toContain('MySpec.groovy:10');
+    });
+
     it('should use strict class+test scoping when multiple failures exist', () => {
       const output = [
         'MySpec > should add FAILED',
