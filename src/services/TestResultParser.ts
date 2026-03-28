@@ -4,6 +4,7 @@ import * as vscode from 'vscode';
 import { XMLParser } from 'fast-xml-parser';
 import { BuildTool, DiffInfo, TestIterationResult } from '../types';
 import { BuildToolService } from './BuildToolService';
+import { prependSourceHint } from './SpockErrorParser';
 
 export class TestResultParser {
   private readonly logger: vscode.LogOutputChannel;
@@ -325,24 +326,24 @@ export class TestResultParser {
 
     // fast-xml-parser may return a string (text-only element) or an object
     if (typeof element === 'string') {
-      return element.trim() || `Test ${tag}`;
+      return prependSourceHint(element.trim() || `Test ${tag}`);
     }
 
     // Try CDATA content first, then plain text body, then message attribute
     const cdata = element['#cdata'];
     if (cdata) {
       const text = typeof cdata === 'string' ? cdata : String(cdata);
-      if (text.trim()) { return text.trim(); }
+      if (text.trim()) { return prependSourceHint(text.trim()); }
     }
 
     const textBody = element['#text'];
     if (textBody) {
       const text = typeof textBody === 'string' ? textBody : String(textBody);
-      if (text.trim()) { return text.trim(); }
+      if (text.trim()) { return prependSourceHint(text.trim()); }
     }
 
     const message = element['@_message'];
-    if (message) { return message; }
+    if (message) { return prependSourceHint(message); }
 
     return `Test ${tag}`;
   }
@@ -677,7 +678,7 @@ export class TestResultParser {
       captured.pop();
     }
 
-    return captured.length > 0 ? captured.join('\n') : undefined;
+    return captured.length > 0 ? prependSourceHint(captured.join('\n')) : undefined;
   }
 
   /**

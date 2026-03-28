@@ -162,6 +162,22 @@ describe('SpockErrorParser', () => {
       expect(result).not.toContain('worker.org.gradle');
     });
 
+    it('should prepend the first user-code stack frame for exception failures', () => {
+      const output = [
+        'BowlingGameSpec > should validate game state transitions FAILED',
+        'java.lang.NullPointerException',
+        '    at java.base/java.util.Objects.requireNonNull(Objects.java:233)',
+        '    at java.base/java.util.List.copyOf(List.java:1193)',
+        '    at com.example.BowlingGame.<init>(BowlingGame.java:27)',
+        '    at com.example.BowlingGameSpec.should validate game state transitions(BowlingGameSpec.groovy:292)',
+      ].join('\n');
+
+      const result = extractErrorForTest(output, 'com.example.BowlingGameSpec', 'should validate game state transitions');
+
+      expect(result).toContain('Source: at com.example.BowlingGame.<init>(BowlingGame.java:27)');
+      expect(result).not.toContain('Source: at java.base/java.util.Objects.requireNonNull(Objects.java:233)');
+    });
+
     it('should return concrete FAILED line when no detailed block is found', () => {
       const output = 'MySpec > test FAILED\nBUILD FAILED';
       const result = extractErrorForTest(output, 'MySpec', 'test');

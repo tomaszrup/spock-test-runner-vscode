@@ -52,7 +52,8 @@ export class TestExecutionService {
       this.logger.appendLine(`TestExecutionService: Executing batch: ${options.commandArgs.join(' ')}`);
       this.logger.appendLine(`TestExecutionService: Working directory: ${options.workspacePath}`);
 
-      const childProcess = spawn(options.commandArgs[0], options.commandArgs.slice(1), {
+      const spawnArgs = normalizeSpawnCommandArgs(options.commandArgs, this.logger);
+      const childProcess = spawn(spawnArgs[0], spawnArgs.slice(1), {
         cwd: options.workspacePath,
         stdio: 'pipe',
         env: { ...process.env },
@@ -228,4 +229,26 @@ function isGradleTaskNoiseLine(line: string): boolean {
   }
   // Keep "> Task :xxx FAILED" lines — they indicate build failures
   return !/FAILED\s*$/i.test(trimmed);
+}
+
+function normalizeSpawnCommandArgs(
+  commandArgs: string[],
+  logger?: vscode.LogOutputChannel,
+): string[] {
+  if (process.platform === 'win32' || commandArgs.length === 0) {
+    return commandArgs;
+  }
+
+  const command = commandArgs[0].replaceAll('\\', '/');
+  const isWrapperScript = command === './gradlew'
+    || command === './mvnw'
+    || command.endsWith('/gradlew')
+    || command.endsWith('/mvnw');
+
+  if (!isWrapperScript) {
+    return commandArgs;
+  }
+
+  logger?.appendLine(`TestExecutionService: Launching wrapper script via sh: ${commandArgs.join(' ')}`);
+  return ['sh', ...commandArgs];
 }

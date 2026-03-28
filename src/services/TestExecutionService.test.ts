@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
+import { spawn } from 'node:child_process';
 import { TestExecutionService } from './TestExecutionService';
 import { createMockLogger } from '../__test_helpers__';
 
@@ -55,6 +56,8 @@ vi.mock('child_process', () => ({
   spawn: vi.fn(() => fakeProc),
 }));
 
+const mockedSpawn = vi.mocked(spawn);
+
 // --- Helpers -------------------------------------------------------------
 
 // createMockLogger imported from __test_helpers__
@@ -91,6 +94,7 @@ describe('TestExecutionService', () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     fakeProc = createFakeChildProcess();
+    mockedSpawn.mockReturnValue(fakeProc as any);
     logger = createMockLogger();
     run = createMockRun();
     service = new TestExecutionService(logger);
@@ -235,6 +239,48 @@ describe('TestExecutionService', () => {
       const result = await promise;
       expect(result.success).toBe(false);
       expect(result.output).toContain('spawn ENOENT');
+    });
+
+    it('should launch local Gradle wrappers through sh on unix-like platforms', async () => {
+      const promise = service.executeBatch({
+        commandArgs: ['./gradlew', 'test'],
+        workspacePath: '/project',
+        run,
+        testItems: [],
+        debug: false,
+      });
+      fakeProc.emit('close', 0);
+      await promise;
+
+      expect(mockedSpawn).toHaveBeenCalledWith(
+        'sh',
+        ['./gradlew', 'test'],
+        expect.objectContaining({
+          cwd: '/project',
+          shell: false,
+        }),
+      );
+    });
+
+    it('should launch local Maven wrappers through sh on unix-like platforms', async () => {
+      const promise = service.executeBatch({
+        commandArgs: ['./mvnw', 'test'],
+        workspacePath: '/project',
+        run,
+        testItems: [],
+        debug: false,
+      });
+      fakeProc.emit('close', 0);
+      await promise;
+
+      expect(mockedSpawn).toHaveBeenCalledWith(
+        'sh',
+        ['./mvnw', 'test'],
+        expect.objectContaining({
+          cwd: '/project',
+          shell: false,
+        }),
+      );
     });
 
     it('should append stderr to run output', async () => {

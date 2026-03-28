@@ -64,6 +64,21 @@ TestSpec > some test > some test [x: 1, #0] SKIPPED
       expect(results).toHaveLength(1);
       expect(results[0].success).toBe(false);
     });
+
+    it('should surface the first user-code frame for failed iteration exceptions', () => {
+      const output = `
+BowlingGameSpec > should validate game state transitions > should validate game state transitions [currentFrame: 1, currentRoll: 1, gameOver: false, #0] FAILED
+    java.lang.NullPointerException
+        at java.base/java.util.Objects.requireNonNull(Objects.java:233)
+        at java.base/java.util.List.copyOf(List.java:1193)
+        at com.example.BowlingGame.<init>(BowlingGame.java:27)
+        at com.example.BowlingGameSpec.should validate game state transitions(BowlingGameSpec.groovy:292)
+`;
+      const results = parser.parseConsoleOutput(output, 'should validate game state transitions');
+      expect(results).toHaveLength(1);
+      expect(results[0].success).toBe(false);
+      expect(results[0].errorInfo?.error).toContain('Source: at com.example.BowlingGame.<init>(BowlingGame.java:27)');
+    });
   });
 
   // ── parseExpectedActual ────────────────────────────────────────────

@@ -19,6 +19,13 @@ export interface ParsedTestError {
   diff?: DiffInfo;
 }
 
+interface ParsedStackFrame {
+  symbol: string;
+  filePath: string;
+  lineNumber: number;
+  text: string;
+}
+
 // ── Public API ───────────────────────────────────────────────────────────
 
 /**
@@ -117,7 +124,7 @@ export function parseTestError(output: string): ParsedTestError | undefined { //
     parts.push('', 'Stack trace:', stackTraceLines.join('\n'));
   }
 
-  const fullError = parts.join('\n');
+  const fullError = prependSourceHint(parts.join('\n'));
   return { error: fullError, location };
 }
 
@@ -289,10 +296,28 @@ export function extractErrorForTest(output: string, className: string, testName:
   }
 
   if (parts.length > 0) {
-    return parts.join('\n');
+    return prependSourceHint(parts.join('\n'));
   }
 
   return fallbackFailureLine || 'Test failed';
+}
+
+export function prependSourceHint(errorText: string): string {
+  if (!errorText.trim()) {
+    return errorText;
+  }
+
+  const sourceFrame = extractRelevantSourceFrame(errorText);
+  if (!sourceFrame) {
+    return errorText;
+  }
+
+  const sourceHint = `Source: ${sourceFrame}`;
+  if (errorText.includes(sourceHint)) {
+    return errorText;
+  }
+
+  return `${sourceHint}\n\n${errorText}`;
 }
 
 function escapeRegExp(value: string): string {
@@ -309,6 +334,38 @@ function isGradleTaskNoiseLine(line: string): boolean {
     return false;
   }
   return !/\bFAILED\s*$/i.test(trimmed);
+}
+
+function extractRelevantSourceFrame(text: string): string | undefined {
+  const frames = text
+    .split('\n')
+    .map(parseStackFrame)
+    .filter((frame): frame is ParsedStackFrame => frame !== undefined);
+
+  if (frames.length === 0) {
+    return undefined;
+  }
+
+  const preferred = frames.find(frame => !isFrameworkStackFrame(frame.symbol));
+  return (preferred ?? frames[0]).text;
+}
+
+function parseStackFrame(line: string): ParsedStackFrame | undefined {
+  const match = /^\s*at\s+(.+?)\((.+\.(?:groovy|java|kt|kts)):(\d+)\)\s*$/.exec(line);
+  if (!match) {
+    return undefined;
+  }
+
+  return {
+    symbol: match[1],
+    filePath: match[2],
+    lineNumber: Number.parseInt(match[3], 10),
+    text: `at ${match[1]}(${match[2]}:${match[3]})`,
+  };
+}
+
+function isFrameworkStackFrame(symbol: string): boolean {
+  return /^(?:java\.|javax\.|jdk\.|sun\.|org\.gradle\.|worker\.org\.gradle\.|org\.junit\.|org\.spockframework\.|org\.codehaus\.groovy\.|groovy\.|com\.intellij\.)/.test(symbol);
 }
 
 /**
