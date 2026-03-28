@@ -29,6 +29,7 @@ export class TestTreeManager {
   public subProjectItems = new Map<string, vscode.TestItem>();
   public packageItems = new Map<string, vscode.TestItem>();
   public knownSpecBaseClasses = new Set<string>();
+  private fileClassDeclarations = new Map<string, Array<{ name: string; parent: string; isAbstract: boolean }>>();
   private discoveryInProgress = false;
   private watchers: vscode.FileSystemWatcher[] = [];
 
@@ -47,6 +48,8 @@ export class TestTreeManager {
   // ── File-system watchers ───────────────────────────────────────────
 
   setupFileWatchers(): void {
+    this.dispose();
+
     if (!vscode.workspace.workspaceFolders) {
       return;
     }
@@ -75,15 +78,19 @@ export class TestTreeManager {
         });
         watcher.onDidDelete(uri => { // NOSONAR
           this.logger.appendLine(`TestTreeManager: File deleted: ${uri.fsPath}`);
+          const fileKey = uri.toString();
+          const hadTrackedDeclarations = (this.fileClassDeclarations.get(fileKey)?.length || 0) > 0;
+          this.fileClassDeclarations.delete(fileKey);
+          this.cleanupIterationItems(fileKey);
           for (const [, subItem] of this.subProjectItems) {
-            subItem.children.delete(uri.toString());
+            subItem.children.delete(fileKey);
           }
           for (const [, projectItem] of this.projectItems) {
-            projectItem.children.delete(uri.toString());
+            projectItem.children.delete(fileKey);
           }
           // Remove file from package nodes, then clean up empty packages
           for (const [pkgKey, pkgItem] of this.packageItems) {
-            pkgItem.children.delete(uri.toString());
+            pkgItem.children.delete(fileKey);
             if (pkgItem.children.size === 0) {
               // Remove empty package from its parent (subproject or project)
               for (const [, subItem] of this.subProjectItems) {
@@ -109,7 +116,14 @@ export class TestTreeManager {
               this.projectItems.delete(rootPath);
             }
           }
-          this.controller.items.delete(uri.toString());
+          this.controller.items.delete(fileKey);
+
+          if (hadTrackedDeclarations) {
+            this.logger.appendLine('TestTreeManager: Deleted file changed class declarations — triggering full discovery');
+            void this.discoverAllTests().catch(error => {
+              this.logger.appendLine(`TestTreeManager: Full discovery after file deletion failed: ${error}`);
+            });
+          }
         });
       }
     });
@@ -148,6 +162,7 @@ export class TestTreeManager {
           this.projectItems.clear();
           this.subProjectItems.clear();
           this.packageItems.clear();
+          this.fileClassDeclarations.clear();
 
           // Notify listeners that tree was rebuilt (e.g. to clear stale re-run state)
           this._onDidRebuildTree.fire();
@@ -207,6 +222,7 @@ export class TestTreeManager {
                   const { uri, content } = result.value;
                   allFileContents.set(uri.toString(), { uri, content });
                   const declarations = this.testDiscoveryService.scanClassDeclarations(content);
+                  this.fileClassDeclarations.set(uri.toString(), declarations);
                   allClassDeclarations.push(...declarations);
                 } else {
                   this.logger.appendLine(`TestTreeManager: Error reading file: ${result.reason}`);
@@ -270,6 +286,17 @@ export class TestTreeManager {
       const content = document.getText();
 
       const declarations = this.testDiscoveryService.scanClassDeclarations(content);
+      const fileKey = file.uri.toString();
+      const previousDeclarations = this.fileClassDeclarations.get(fileKey) || [];
+      this.fileClassDeclarations.set(fileKey, declarations);
+
+      if (this.haveDeclarationsChanged(previousDeclarations, declarations) &&
+          (previousDeclarations.length > 0 || declarations.length > 0)) {
+        this.logger.appendLine(`TestTreeManager: Class declarations changed in ${file.uri.fsPath} — triggering full discovery`);
+        await this.discoverAllTests();
+        return;
+      }
+
       for (const decl of declarations) {
         if (this.knownSpecBaseClasses.has(decl.parent) ||
             (decl.parent.includes('.') && this.knownSpecBaseClasses.has(decl.parent.split('.').pop()!))) {
@@ -735,6 +762,28 @@ export class TestTreeManager {
     return whereBlock.parameterNames
       .map((name, col) => `${name}: ${whereBlock.dataRows![index][col]}`)
       .join(', ');
+  }
+
+  private haveDeclarationsChanged(
+    previous: Array<{ name: string; parent: string; isAbstract: boolean }>,
+    current: Array<{ name: string; parent: string; isAbstract: boolean }>,
+  ): boolean {
+    if (previous.length !== current.length) {
+      return true;
+    }
+
+    for (let index = 0; index < previous.length; index++) {
+      const prev = previous[index];
+      const next = current[index];
+      if (!next ||
+          prev.name !== next.name ||
+          prev.parent !== next.parent ||
+          prev.isAbstract !== next.isAbstract) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   // ── Annotation tag helpers ─────────────────────────────────────────

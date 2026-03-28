@@ -171,6 +171,12 @@ export interface BatchCommandOptions {
   buildTool?: BuildTool;
   debugPort?: number;
   classTestCounts?: Map<string, number>;
+  testDescriptors?: TestDescriptor[];
+}
+
+export interface TestDescriptor {
+  className: string;
+  testName?: string;
 }
 
 export class BuildToolService {
@@ -725,7 +731,7 @@ export class BuildToolService {
     subprojectPrefix?: string,
     options: BatchCommandOptions = {}
   ): Promise<string[]> {
-    const { coverage = false, buildTool, debugPort, classTestCounts } = options;
+    const { coverage = false, buildTool, debugPort, classTestCounts, testDescriptors } = options;
     const detected = buildTool || (workspacePath ? await this.detectBuildTool(workspacePath) : null);
     if (!detected && logger) {
       logger.appendLine('BuildToolService: WARNING — neither Gradle nor Maven detected, defaulting to Gradle');
@@ -734,9 +740,9 @@ export class BuildToolService {
     const detectedTool: BuildTool = detected || 'gradle';
 
     if (detectedTool === 'maven') {
-      return this.buildMavenBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage, debugPort);
+      return this.buildMavenBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, coverage, debugPort, testDescriptors);
     }
-    return this.buildGradleBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, { coverage, debugPort, classTestCounts });
+    return this.buildGradleBatchCommandArgs(testFilters, debug, workspacePath, logger, subprojectPrefix, { coverage, debugPort, classTestCounts, testDescriptors });
   }
 
   // ── Gradle command building ────────────────────────────────────────
@@ -794,7 +800,7 @@ export class BuildToolService {
     subprojectPrefix?: string,
     options: Omit<BatchCommandOptions, 'buildTool'> = {}
   ): Promise<string[]> {
-    const { coverage = false, debugPort, classTestCounts } = options;
+    const { coverage = false, debugPort, classTestCounts, testDescriptors } = options;
     const configScope = workspacePath ? vscode.Uri.file(workspacePath) : undefined;
     const cfg = ConfigurationService.getConfig(configScope);
     let gradleCommand: string;
@@ -809,7 +815,7 @@ export class BuildToolService {
 
     const taskName = subprojectPrefix ? `${subprojectPrefix}:test` : 'test';
     const args = [gradleCommand, taskName, '--rerun-tasks'];
-    const coalesced = this.coalesceGradleFilters(testFilters, classTestCounts, logger);
+    const coalesced = this.coalesceGradleFilters(testFilters, classTestCounts, logger, testDescriptors);
     for (const filter of coalesced) {
       args.push('--tests', shellEscape(sanitizeTestFilter(filter, logger)));
     }
@@ -894,7 +900,8 @@ export class BuildToolService {
     logger?: vscode.OutputChannel,
     mavenModuleName?: string,
     coverage: boolean = false,
-    debugPort?: number
+    debugPort?: number,
+    testDescriptors?: TestDescriptor[],
   ): Promise<string[]> {
     const configScope = workspacePath ? vscode.Uri.file(workspacePath) : undefined;
     const cfg = ConfigurationService.getConfig(configScope);
@@ -902,12 +909,19 @@ export class BuildToolService {
     const packaging = await this.getMavenPackaging(workspacePath, mavenModuleName, logger);
     const pomPackaging = packaging === 'pom';
 
-    // Group filters by class for Surefire: "Class1#m1+m2,Class2#m3"
-    const sanitizedFilters = testFilters.map(f => sanitizeTestFilter(f, logger));
-    const surefireFilter = this.buildSurefireBatchFilter(sanitizedFilters);
+    const args = [mvnCommand, ...(pomPackaging ? ['test-compile', 'surefire:test'] : ['test'])];
 
-    const args = [mvnCommand, ...(pomPackaging ? ['test-compile', 'surefire:test'] : ['test']),
-      `-Dtest=${shellEscape(surefireFilter)}`, '-Dsurefire.useFile=true', '-Dsurefire.failIfNoSpecifiedTests=false'];
+    const sanitizedDescriptors = testDescriptors?.map(descriptor => ({
+      className: sanitizeTestFilter(descriptor.className, logger),
+      testName: descriptor.testName ? sanitizeTestFilter(descriptor.testName, logger) : undefined,
+    }));
+    const surefireFilter = sanitizedDescriptors && sanitizedDescriptors.length > 0
+      ? this.buildSurefireBatchFilterFromDescriptors(sanitizedDescriptors)
+      : this.buildSurefireBatchFilter(testFilters.map(f => sanitizeTestFilter(f, logger)));
+
+    if (surefireFilter) {
+      args.push(`-Dtest=${shellEscape(surefireFilter)}`, '-Dsurefire.useFile=true', '-Dsurefire.failIfNoSpecifiedTests=false');
+    }
 
     if (mavenModuleName) {
       args.push('-pl', mavenModuleName, '-am');
@@ -1001,6 +1015,31 @@ export class BuildToolService {
     return parts.join(',');
   }
 
+  static buildSurefireBatchFilterFromDescriptors(testDescriptors: TestDescriptor[]): string {
+    const classMap = new Map<string, string[]>();
+
+    for (const descriptor of testDescriptors) {
+      if (!classMap.has(descriptor.className)) {
+        classMap.set(descriptor.className, []);
+      }
+
+      if (descriptor.testName) {
+        classMap.get(descriptor.className)!.push(this.escapeMethodForSurefire(descriptor.testName));
+      }
+    }
+
+    const parts: string[] = [];
+    for (const [className, methods] of classMap) {
+      if (methods.length === 0) {
+        parts.push(className);
+      } else {
+        parts.push(`${className}#${methods.join('+')}`);
+      }
+    }
+
+    return parts.join(',');
+  }
+
   /**
    * Escape a Spock method/display name for use in Surefire's `-Dtest` filter.
    *
@@ -1050,22 +1089,34 @@ export class BuildToolService {
     testFilters: string[],
     classTestCounts?: Map<string, number>,
     logger?: vscode.OutputChannel,
+    testDescriptors?: TestDescriptor[],
   ): string[] {
     if (!classTestCounts || classTestCounts.size === 0) {
       return testFilters;
     }
 
-    // Group selected filters by class name
     const selectedByClass = new Map<string, string[]>();
-    for (const filter of testFilters) {
-      const dotIdx = filter.indexOf('.');
-      if (dotIdx > 0) {
-        const className = filter.substring(0, dotIdx);
-        if (!selectedByClass.has(className)) {
-          selectedByClass.set(className, []);
-        }
-        selectedByClass.get(className)!.push(filter);
+    const descriptors = testDescriptors && testDescriptors.length === testFilters.length
+      ? testDescriptors
+      : testFilters.map(filter => {
+        const lastDot = filter.lastIndexOf('.');
+        return {
+          className: lastDot > 0 ? filter.substring(0, lastDot) : filter,
+          testName: lastDot > 0 ? filter.substring(lastDot + 1) : undefined,
+        };
+      });
+
+    for (let index = 0; index < testFilters.length; index++) {
+      const filter = testFilters[index];
+      const descriptor = descriptors[index];
+      const className = descriptor?.className;
+      if (!className || !descriptor.testName) {
+        continue;
       }
+      if (!selectedByClass.has(className)) {
+        selectedByClass.set(className, []);
+      }
+      selectedByClass.get(className)!.push(filter);
     }
 
     const result: string[] = [];

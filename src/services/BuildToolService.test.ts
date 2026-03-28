@@ -746,6 +746,23 @@ include 'other-module'
       expect(args.some(a => a.includes('-Dtest='))).toBe(true);
     });
 
+    it('should preserve dotted Spock display names when descriptors are provided', async () => {
+      const args = await BuildToolService.buildBatchCommandArgs(
+        ['com.example.ApiSpec.renders v1.2 response'],
+        false,
+        '/project',
+        undefined,
+        undefined,
+        {
+          coverage: false,
+          buildTool: 'maven',
+          testDescriptors: [{ className: 'com.example.ApiSpec', testName: 'renders v1.2 response' }],
+        },
+      );
+
+      expect(args).toContain(String.raw`-Dtest=com.example.ApiSpec#renders v1\.2 response`);
+    });
+
     it('should include JaCoCo goals when coverage=true', async () => {
       const args = await BuildToolService.buildBatchCommandArgs(
         ['TestA.m1'],
@@ -786,6 +803,20 @@ include 'other-module'
       expect(args).toContain('test-compile');
       expect(args).toContain('surefire:test');
       expect(args.filter(a => a === 'test')).toHaveLength(0);
+    });
+
+    it('should omit -Dtest when running a whole Maven module', async () => {
+      const args = await BuildToolService.buildBatchCommandArgs(
+        [],
+        false,
+        '/project',
+        undefined,
+        undefined,
+        { coverage: false, buildTool: 'maven' }
+      );
+
+      expect(args).toContain('test');
+      expect(args.some(a => a.startsWith('-Dtest='))).toBe(false);
     });
   });
 
@@ -1129,6 +1160,16 @@ include 'other-module'
       expect(logger.appendLine).toHaveBeenCalledWith(
         expect.stringContaining('Coalesced 1 class(es)')
       );
+    });
+
+    it('should coalesce fully qualified class names when descriptors are provided', () => {
+      const filters = ['com.example.ClassA.test1', 'com.example.ClassA.test2'];
+      const counts = new Map([['com.example.ClassA', 2]]);
+      const result = BuildToolService.coalesceGradleFilters(filters, counts, undefined, [
+        { className: 'com.example.ClassA', testName: 'test1' },
+        { className: 'com.example.ClassA', testName: 'test2' },
+      ]);
+      expect(result).toEqual(['com.example.ClassA.*']);
     });
   });
 

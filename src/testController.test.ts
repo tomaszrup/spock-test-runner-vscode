@@ -6,6 +6,8 @@ import { createMockLogger } from './__test_helpers__';
 
 // --- Mocks ---------------------------------------------------------------
 
+let configChangeCallback: ((cfg: any) => void) | undefined;
+
 vi.mock('fs');
 vi.mock('./services/ConfigurationService', () => {
   const mockConfig = {
@@ -22,7 +24,10 @@ vi.mock('./services/ConfigurationService', () => {
     getConfig() { return MockConfigurationService.getConfig(); }
     onConfigChange(cb: any) { return MockConfigurationService.onConfigChange(cb); }
     static getConfig() { return mockConfig; }
-    static onConfigChange() { return { dispose: () => {} }; }
+    static onConfigChange(cb: any) {
+      configChangeCallback = cb;
+      return { dispose: () => {} };
+    }
   }
   return { ConfigurationService: MockConfigurationService };
 });
@@ -132,6 +137,7 @@ describe('SpockTestController', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (vscode.tests as any)._controllers = [];
+    configChangeCallback = undefined;
   });
 
   // ── Construction ──────────────────────────────────────────────────
@@ -162,6 +168,33 @@ describe('SpockTestController', () => {
       const ctx = createMockContext();
       const controller = new SpockTestController(ctx, logger);
       expect(controller).toBeDefined();
+    });
+
+    it('should refresh watchers and rediscover tests when testSourcePatterns change', async () => {
+      const findFilesSpy = vi.fn(async () => []);
+      const watcherSpy = vi.spyOn(vscode.workspace, 'createFileSystemWatcher' as any);
+
+      createController({ findFiles: findFilesSpy });
+      const initialWatcherCalls = watcherSpy.mock.calls.length;
+      const initialFindCalls = findFilesSpy.mock.calls.length;
+
+      configChangeCallback?.({
+        debugPort: 5005,
+        testTimeout: 300,
+        debugConnectionTimeout: 60,
+        debugRetries: 3,
+        additionalGradleArgs: [],
+        additionalMavenArgs: [],
+        showDiffView: false,
+        testSourcePatterns: ['**/src/integrationTest/groovy/**/*.groovy'],
+      });
+
+      for (let i = 0; i < 10; i++) {
+        await new Promise(process.nextTick);
+      }
+
+      expect(watcherSpy.mock.calls.length).toBeGreaterThan(initialWatcherCalls);
+      expect(findFilesSpy.mock.calls.length).toBeGreaterThan(initialFindCalls);
     });
   });
 

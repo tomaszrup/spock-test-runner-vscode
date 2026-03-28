@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { IBuildToolService, BuildToolService } from './services/BuildToolService';
+import { IBuildToolService, BuildToolService, TestDescriptor } from './services/BuildToolService';
 import { ConfigurationService } from './services/ConfigurationService';
 import { CoverageService } from './services/CoverageService';
 import { DebugService } from './services/DebugService';
@@ -31,6 +31,7 @@ interface RunBatchOptions {
 interface BatchRunContext {
   testLookup: Map<string, TestLookupEntry>;
   tests: Array<{test: vscode.TestItem; data: TestData}>;
+  testDescriptors?: TestDescriptor[];
   debug: boolean;
   rootProject: string;
   subprojectPrefix?: string;
@@ -571,7 +572,7 @@ export class TestRunCoordinator {
     }
 
     // Build test filters & lookup table
-    const { testFilters, testLookup } = this.buildTestLookup(tests);
+    const { testFilters, testLookup, testDescriptors } = this.buildTestLookup(tests);
 
     if (testFilters.length === 0) {
       this.logger.appendLine('TestRunCoordinator: No valid test filters, skipping batch');
@@ -584,15 +585,17 @@ export class TestRunCoordinator {
     // Compute per-class method counts from the full test tree for wildcard coalescing
     const classTestCounts = this.buildClassTestCounts(tests);
 
-    // Fast path for whole-project Gradle runs: invoke project test task without --tests filters.
-    if (runWholeProjectTask && buildTool === 'gradle') {
-      this.logger.appendLine('TestRunCoordinator: Execution mode = whole-project task (Gradle, no --tests filters)');
+    // Fast path for whole-project runs: invoke the project/module test task
+    // without explicit per-test filters.
+    if (runWholeProjectTask) {
+      this.logger.appendLine(`TestRunCoordinator: Execution mode = whole-project task (${buildTool}, no explicit test filters)`);
       this.logger.appendLine(`TestRunCoordinator: Execution target = ${this.getExecutionTarget(subprojectPrefix)} (root=${rootProject}, group=${projectRoot})`);
       await this.runSingleBatch(
         [],
         {
           testLookup,
           tests,
+          testDescriptors: [],
           debug,
           rootProject,
           subprojectPrefix,
@@ -618,6 +621,7 @@ export class TestRunCoordinator {
         {
           testLookup,
           tests,
+          testDescriptors,
           debug,
           rootProject,
           subprojectPrefix,
@@ -638,6 +642,7 @@ export class TestRunCoordinator {
         {
           testLookup,
           tests,
+          testDescriptors,
           debug,
           rootProject,
           subprojectPrefix,
@@ -683,6 +688,7 @@ export class TestRunCoordinator {
     const {
       classTestCounts = new Map<string, number>(),
       testLookup,
+      testDescriptors,
       debug,
       rootProject,
       subprojectPrefix,
@@ -700,7 +706,7 @@ export class TestRunCoordinator {
     );
 
     // Apply wildcard coalescing first (reduces filter count significantly)
-    const coalesced = BuildToolService.coalesceGradleFilters(testFilters, classTestCounts, this.logger);
+    const coalesced = BuildToolService.coalesceGradleFilters(testFilters, classTestCounts, this.logger, testDescriptors);
 
     // Split into sub-batches based on estimated command-line length
     const batches = BuildToolService.splitGradleTestFilters(coalesced, probeArgs);
@@ -763,14 +769,14 @@ export class TestRunCoordinator {
     context: BatchRunContext;
   }): Promise<{ success: boolean; output: string }> {
     const { batchFilters, batchIndex, batchCount, context } = args;
-    const { testLookup, tests, debug, rootProject, subprojectPrefix, coverage, buildTool, run, token, start, projectRoot, debugPort, classTestCounts } = context;
+    const { testLookup, tests, testDescriptors, debug, rootProject, subprojectPrefix, coverage, buildTool, run, token, start, projectRoot, debugPort, classTestCounts } = context;
     const commandArgs = await this.buildToolService.buildBatchCommandArgs(
       batchFilters,
       debug,
       rootProject,
       this.logger,
       subprojectPrefix,
-      { coverage, buildTool, debugPort, classTestCounts },
+      { coverage, buildTool, debugPort, classTestCounts, testDescriptors },
     );
 
     if (batchCount > 1) {
@@ -837,6 +843,7 @@ export class TestRunCoordinator {
       classTestCounts,
       testLookup,
       tests,
+      testDescriptors,
       debug,
       rootProject,
       subprojectPrefix,
@@ -851,7 +858,7 @@ export class TestRunCoordinator {
     // Execute tests
     const commandArgs = await this.buildToolService.buildBatchCommandArgs(
       testFilters, debug, rootProject, this.logger, subprojectPrefix,
-      { coverage, buildTool, debugPort, classTestCounts },
+      { coverage, buildTool, debugPort, classTestCounts, testDescriptors },
     );
 
     this.logger.appendLine(`TestRunCoordinator: Running batch of ${tests.length} test(s) in ${projectRoot}${coverage ? ' (with coverage)' : ''}`);
@@ -929,14 +936,17 @@ export class TestRunCoordinator {
   private buildTestLookup(tests: Array<{test: vscode.TestItem; data: TestData}>): {
     testFilters: string[];
     testLookup: Map<string, TestLookupEntry>;
+    testDescriptors: TestDescriptor[];
   } {
     const testFilters: string[] = [];
     const testLookup = new Map<string, TestLookupEntry>();
+    const testDescriptors: TestDescriptor[] = [];
 
     for (const item of tests) {
       const classId = item.data.classFqn || item.data.className;
       if (classId && item.data.testName) {
         testFilters.push(`${classId}.${item.data.testName}`);
+        testDescriptors.push({ className: classId, testName: item.data.testName });
         const key = `${classId}#${item.data.testName}`;
         testLookup.set(key, {...item, resolved: false, seenStatus: undefined});
       } else {
@@ -944,7 +954,7 @@ export class TestRunCoordinator {
       }
     }
 
-    return { testFilters, testLookup };
+    return { testFilters, testLookup, testDescriptors };
   }
 
   /**
@@ -963,7 +973,8 @@ export class TestRunCoordinator {
     const visitedClasses = new Set<string>();
 
     for (const { test, data } of tests) {
-      if (!data.className || visitedClasses.has(data.className)) {
+      const classId = data.classFqn || data.className;
+      if (!classId || visitedClasses.has(classId)) {
         continue;
       }
 
@@ -972,8 +983,8 @@ export class TestRunCoordinator {
       if (classNode) {
         let methodCount = 0;
         classNode.children.forEach(() => { methodCount++; });
-        counts.set(data.className, methodCount);
-        visitedClasses.add(data.className);
+        counts.set(classId, methodCount);
+        visitedClasses.add(classId);
       }
     }
 

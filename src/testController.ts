@@ -66,6 +66,7 @@ export class SpockTestController {
 
     this.setupTestController();
     this.treeManager.setupFileWatchers();
+    this.registerConfigListeners(context, configurationService);
     this.createRunProfiles();
     this.registerCommands(context);
 
@@ -73,6 +74,28 @@ export class SpockTestController {
     this.startInitialDiscovery();
 
     context.subscriptions.push(this.controller, { dispose: () => this.treeManager.dispose() });
+  }
+
+  private registerConfigListeners(
+    context: vscode.ExtensionContext,
+    configurationService: ConfigurationService,
+  ): void {
+    let previousPatterns = configurationService.getConfig().testSourcePatterns;
+    const configListener = configurationService.onConfigChange((cfg) => {
+      if (!this.haveSamePatterns(previousPatterns, cfg.testSourcePatterns)) {
+        this.logger.appendLine('SpockTestController: testSourcePatterns changed — refreshing watchers and rediscovering tests');
+        previousPatterns = [...cfg.testSourcePatterns];
+        this.treeManager.setupFileWatchers();
+        void this.ensureFullDiscovery(true, 'configChange:testSourcePatterns').catch(error => {
+          this.logger.appendLine(`SpockTestController: Error during config-triggered discovery: ${error}`);
+        });
+      }
+    });
+    context.subscriptions.push(configListener);
+  }
+
+  private haveSamePatterns(previous: string[], current: string[]): boolean {
+    return previous.length === current.length && previous.every((pattern, index) => pattern === current[index]);
   }
 
   private startInitialDiscovery(): void {

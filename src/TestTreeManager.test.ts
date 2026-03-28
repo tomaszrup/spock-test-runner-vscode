@@ -209,6 +209,60 @@ describe('TestTreeManager', () => {
         (vscode.workspace as any).createFileSystemWatcher = originalCreateWatcher;
       }
     });
+
+    it('should dispose existing watchers before recreating them', () => {
+      const disposeSpy = vi.fn();
+      (manager as any).watchers = [{ dispose: disposeSpy }];
+
+      const originalCreateWatcher = vscode.workspace.createFileSystemWatcher;
+      try {
+        (vscode.workspace as any).createFileSystemWatcher = vi.fn(() => ({
+          onDidCreate: () => ({ dispose: () => {} }),
+          onDidChange: () => ({ dispose: () => {} }),
+          onDidDelete: () => ({ dispose: () => {} }),
+          dispose: () => {},
+        }));
+
+        manager.setupFileWatchers();
+
+        expect(disposeSpy).toHaveBeenCalled();
+      } finally {
+        (vscode.workspace as any).createFileSystemWatcher = originalCreateWatcher;
+      }
+    });
+
+    it('should trigger full discovery when a deleted file had cached class declarations', async () => {
+      const callbacks: {
+        delete?: (uri: vscode.Uri) => void;
+      } = {};
+
+      const originalCreateWatcher = vscode.workspace.createFileSystemWatcher;
+      try {
+        (vscode.workspace as any).createFileSystemWatcher = vi.fn(() => ({
+          onDidCreate: () => ({ dispose: () => {} }),
+          onDidChange: () => ({ dispose: () => {} }),
+          onDidDelete: (cb: (uri: vscode.Uri) => void) => {
+            callbacks.delete = cb;
+            return { dispose: () => {} };
+          },
+          dispose: () => {},
+        }));
+
+        const fullDiscoverySpy = vi.spyOn(manager, 'discoverAllTests').mockResolvedValue();
+        const fileUri = vscode.Uri.file('/workspace/project/src/test/groovy/BaseSpec.groovy');
+        (manager as any).fileClassDeclarations.set(fileUri.toString(), [
+          { name: 'BaseSpec', parent: 'Specification', isAbstract: true },
+        ]);
+
+        manager.setupFileWatchers();
+        callbacks.delete?.(fileUri);
+        await Promise.resolve();
+
+        expect(fullDiscoverySpy).toHaveBeenCalled();
+      } finally {
+        (vscode.workspace as any).createFileSystemWatcher = originalCreateWatcher;
+      }
+    });
   });
 
   // ── parseTestsInFile ─────────────────────────────────────────────
@@ -1046,6 +1100,9 @@ describe('TestTreeManager', () => {
       manager.testData.set(file, { type: 'file' });
 
       manager.knownSpecBaseClasses.add('Specification');
+      (manager as any).fileClassDeclarations.set(uri.toString(), [
+        { name: 'CustomBase', parent: 'Specification', isAbstract: false },
+      ]);
 
       (vscode.workspace as any).openTextDocument = vi.fn().mockResolvedValue({
         getText: () => 'class CustomBase extends Specification {}',
@@ -1066,6 +1123,30 @@ describe('TestTreeManager', () => {
       // uri is undefined
       await manager.discoverTestsInFile(file);
       // should not throw
+    });
+
+    it('should trigger full discovery when class declarations change', async () => {
+      const uri = vscode.Uri.file('/workspace/project/src/test/groovy/BaseSpec.groovy');
+      const file = controller.createTestItem(uri.toString(), 'BaseSpec.groovy', uri);
+      manager.testData.set(file, { type: 'file' });
+      (manager as any).fileClassDeclarations.set(uri.toString(), [
+        { name: 'BaseSpec', parent: 'Specification', isAbstract: true },
+      ]);
+
+      (vscode.workspace as any).openTextDocument = vi.fn().mockResolvedValue({
+        getText: () => 'abstract class BaseSpec extends Object {}',
+      });
+
+      testDiscoveryService.scanClassDeclarations.mockReturnValue([
+        { name: 'BaseSpec', parent: 'Object', isAbstract: true },
+      ]);
+
+      const fullDiscoverySpy = vi.spyOn(manager, 'discoverAllTests').mockResolvedValue();
+
+      await manager.discoverTestsInFile(file);
+
+      expect(fullDiscoverySpy).toHaveBeenCalled();
+      expect(testDiscoveryService.parseTestsInFile).not.toHaveBeenCalled();
     });
   });
 
@@ -1111,6 +1192,30 @@ describe('TestTreeManager', () => {
       expect(manager.projectItems.size).toBe(0);
       expect(manager.subProjectItems.size).toBe(0);
       expect(manager.packageItems.size).toBe(0);
+    });
+
+    it('should refresh cached class declarations during full discovery', async () => {
+      const uri = vscode.Uri.file('/workspace/project/src/test/groovy/MySpec.groovy');
+      (vscode.workspace as any).findFiles = vi.fn().mockResolvedValue([uri]);
+      (vscode.workspace as any).openTextDocument = vi.fn().mockResolvedValue({
+        getText: () => 'class MySpec extends Specification {}',
+        uri,
+      });
+      (vscode.window as any).withProgress = vi.fn(async (_: any, task: any) => {
+        return task({ report: vi.fn() }, { isCancellationRequested: false });
+      });
+
+      testDiscoveryService.scanClassDeclarations.mockReturnValue([
+        { name: 'MySpec', parent: 'Specification', isAbstract: false },
+      ]);
+      testDiscoveryService.resolveAllSpecBaseClasses.mockReturnValue(new Set(['Specification', 'MySpec']));
+      testDiscoveryService.parseTestsInFile.mockReturnValue([]);
+
+      await manager.discoverAllTests();
+
+      expect((manager as any).fileClassDeclarations.get(uri.toString())).toEqual([
+        { name: 'MySpec', parent: 'Specification', isAbstract: false },
+      ]);
     });
   });
 

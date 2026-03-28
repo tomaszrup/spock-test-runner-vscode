@@ -381,6 +381,29 @@ describe('TestRunCoordinator', () => {
       expect(filterArgCalls.length).toBeGreaterThan(0);
       expect(filterArgCalls.every((arg: string[]) => Array.isArray(arg) && arg.length === 0)).toBe(true);
     });
+
+    it('should use plain Maven project task when request.include is undefined (run all)', async () => {
+      const run = createMockRun();
+      controller.createTestRun = vi.fn(() => run);
+      buildToolService.detectBuildTool.mockResolvedValue('maven');
+
+      const project = controller.createTestItem('p1', 'project', vscode.Uri.file('/workspace/project'));
+      treeManager.testData.set(project, { type: 'project' });
+
+      const testItem = controller.createTestItem('t1', 'test one', vscode.Uri.file('/workspace/project/spec.groovy'));
+      treeManager.testData.set(testItem, { type: 'test', className: 'Spec', testName: 'test one' });
+      project.children.add(testItem);
+      controller.items.add(project);
+
+      const token = createCancellationToken();
+      const request = new vscode.TestRunRequest();
+
+      await coordinator.runHandler(false, request, token);
+
+      const wholeProjectCall = buildToolService.buildBatchCommandArgs.mock.calls.find((call: any[]) =>
+        Array.isArray(call[0]) && call[0].length === 0 && call.at(-1)?.buildTool === 'maven');
+      expect(wholeProjectCall).toBeDefined();
+    });
   });
 
   // ── Progress bar delta fix ───────────────────────────────────────
@@ -544,8 +567,8 @@ describe('TestRunCoordinator', () => {
       classItem.children.add(test2);
 
       const tests = [
-        { test: test1, data: { type: 'test' as const, className: 'MySpec', testName: 'test one' } },
-        { test: test2, data: { type: 'test' as const, className: 'MySpec', testName: 'test two' } },
+        { test: test1, data: { type: 'test' as const, className: 'MySpec', classFqn: 'com.example.MySpec', testName: 'test one' } },
+        { test: test2, data: { type: 'test' as const, className: 'MySpec', classFqn: 'com.example.MySpec', testName: 'test two' } },
       ];
 
       await coordinator.runBatch('/workspace/project', { uri: vscode.Uri.file('/workspace'), name: 'workspace', index: 0 }, tests, run as any, false, createCancellationToken());
@@ -555,7 +578,7 @@ describe('TestRunCoordinator', () => {
       // At least one call should include the class test counts map in options
       const hasClassTestCounts = calls.some((call: any[]) => {
         const options = call.at(-1);
-        return options?.classTestCounts instanceof Map && options.classTestCounts.get('MySpec') === 2;
+        return options?.classTestCounts instanceof Map && options.classTestCounts.get('com.example.MySpec') === 2;
       });
       expect(hasClassTestCounts).toBe(true);
     });
