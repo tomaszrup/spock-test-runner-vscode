@@ -178,6 +178,22 @@ describe('SpockErrorParser', () => {
       expect(result).not.toContain('Source: at java.base/java.util.Objects.requireNonNull(Objects.java:233)');
     });
 
+    it('should not prepend a source hint when the first stack frame is already user code', () => {
+      const output = [
+        'MySpec > should add FAILED',
+        'Condition not satisfied:',
+        '  result == 5',
+        '  |      |',
+        '  4      false',
+        '    at com.example.MySpec.should add(MySpec.groovy:10)',
+      ].join('\n');
+
+      const result = extractErrorForTest(output, 'com.example.MySpec', 'should add');
+
+      expect(result).not.toContain('Source:');
+      expect(result).toContain('at com.example.MySpec.should add(MySpec.groovy:10)');
+    });
+
     it('should return concrete FAILED line when no detailed block is found', () => {
       const output = 'MySpec > test FAILED\nBUILD FAILED';
       const result = extractErrorForTest(output, 'MySpec', 'test');

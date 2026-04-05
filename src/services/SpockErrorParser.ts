@@ -312,7 +312,11 @@ export function prependSourceHint(errorText: string): string {
     return errorText;
   }
 
-  const sourceHint = `Source: ${sourceFrame}`;
+  if (!sourceFrame.shouldPrepend) {
+    return errorText;
+  }
+
+  const sourceHint = `Source: ${sourceFrame.text}`;
   if (errorText.includes(sourceHint)) {
     return errorText;
   }
@@ -336,7 +340,7 @@ function isGradleTaskNoiseLine(line: string): boolean {
   return !/\bFAILED\s*$/i.test(trimmed);
 }
 
-function extractRelevantSourceFrame(text: string): string | undefined {
+function extractRelevantSourceFrame(text: string): { text: string; shouldPrepend: boolean } | undefined {
   const frames = text
     .split('\n')
     .map(parseStackFrame)
@@ -347,7 +351,11 @@ function extractRelevantSourceFrame(text: string): string | undefined {
   }
 
   const preferred = frames.find(frame => !isFrameworkStackFrame(frame.symbol));
-  return (preferred ?? frames[0]).text;
+  const selected = preferred ?? frames[0];
+  return {
+    text: selected.text,
+    shouldPrepend: selected.text !== frames[0].text,
+  };
 }
 
 function parseStackFrame(line: string): ParsedStackFrame | undefined {
