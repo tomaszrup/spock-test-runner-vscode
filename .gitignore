@@ -12,3 +12,6 @@ coverage/
 **/target/
 **/build/
 .gradle
+e2e-results/
+playwright-report/
+test-results/

@@ -2,6 +2,11 @@
 .vscode-test/**
 src/**
 sample/**
+e2e/**
+playwright-report/**
+e2e-results/**
+playwright.config.ts
+.vscode-test.mjs
 .gitignore
 .yarnrc
 vsc-extension-quickstart.md

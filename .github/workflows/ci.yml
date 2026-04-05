@@ -83,6 +83,89 @@ jobs:
           name: coverage-report
           path: coverage/
 
+  e2e-test:
+    name: E2E Tests
+    needs: [test]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build-tool: [gradle, maven]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Gradle
+        if: matrix.build-tool == 'gradle'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            sample/sample-project/.gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('sample/sample-project/**/*.gradle*') }}
+          restore-keys: ${{ runner.os }}-gradle-
+
+      - name: Cache Maven
+        if: matrix.build-tool == 'maven'
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('sample/sample-maven-project/**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-maven-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile extension
+        run: npm run compile
+
+      - name: Compile E2E tests
+        run: npm run compile:e2e
+
+      - name: Warm build cache (Gradle)
+        if: matrix.build-tool == 'gradle'
+        working-directory: sample/sample-project
+        run: ./gradlew build -x test --no-daemon || true
+
+      - name: Warm build cache (Maven)
+        if: matrix.build-tool == 'maven'
+        working-directory: sample/sample-maven-project
+        run: ./mvnw compile -q || true
+
+      - name: Run Extension Host E2E tests
+        env:
+          E2E_BUILD_TOOL: ${{ matrix.build-tool }}
+        run: xvfb-run --auto-servernum npm run test:e2e:host
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright UI E2E tests
+        env:
+          E2E_BUILD_TOOL: ${{ matrix.build-tool }}
+        run: xvfb-run --auto-servernum npm run test:e2e:ui
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.build-tool }}
+          path: playwright-report/
+
   update-badges:
     name: Update Coverage Badges
     needs: [test]
