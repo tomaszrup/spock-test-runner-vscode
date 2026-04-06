@@ -84,7 +84,7 @@ test.describe('Test Execution — UI', () => {
       '[class*="test-result"], [class*="testResults"], .test-output-peek',
     );
     // Just verify the panel exists after the test run
-    const isVisible = await resultsPanel.first().isVisible({ timeout: 10_000 }).catch(() => false);
+    await resultsPanel.first().isVisible({ timeout: 10_000 }).catch(() => false);
     // Not all VS Code versions auto-show the results panel, so this is a soft check
     expect(true).toBe(true);
   });

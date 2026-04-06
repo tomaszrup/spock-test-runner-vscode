@@ -1,0 +1,5 @@
+{
+    "spockTestRunner.testSourcePatterns": [
+        "**/src/test/groovy/**/*.groovy"
+    ]
+}

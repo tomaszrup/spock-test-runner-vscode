@@ -17,8 +17,6 @@ test.describe('Commands — UI', () => {
   });
 
   test('Re-run Failed Tests command exists in palette', async ({ vscodePage }) => {
-    const explorer = new TestExplorer(vscodePage);
-
     // Open Command Palette
     await vscodePage.keyboard.press('Control+Shift+KeyP');
     await vscodePage.waitForTimeout(500);
@@ -56,9 +54,6 @@ test.describe('Commands — UI', () => {
     const explorer = new TestExplorer(vscodePage);
     await explorer.open();
     await explorer.waitForTestTree(90_000);
-
-    // Note the current items
-    const itemsBefore = await explorer.getTreeItems();
 
     // Reload
     await explorer.runCommand('Spock Test Runner: Reload Spock Tests');

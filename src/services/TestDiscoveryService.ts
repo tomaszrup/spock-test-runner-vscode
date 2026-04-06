@@ -1,12 +1,28 @@
 import * as vscode from 'vscode';
 import { SpockAnnotation, SpockTestClass, SpockTestMethod, WhereBlockData } from '../types';
+import { collectAnnotationsAbove, getAnnotationArgument, hasAnnotation } from './testDiscoveryAnnotations';
+import {
+  CLASS_REGEX,
+  ClassDeclaration,
+  KNOWN_NON_SPEC_BASES,
+  KNOWN_SPEC_BASES,
+  LIFECYCLE_METHODS,
+  METHOD_HEADER_REGEX,
+} from './testDiscoveryShared';
+import {
+  countBraceDelta,
+  hasOpeningBraceOnOrNextLine,
+  hasWhereBlock,
+  lineHasSpockBlockLabelNearby,
+  parseWhereBlock,
+} from './testDiscoveryWhere';
 
 /**
  * Interface for test discovery — enables mocking in tests without
  * requiring static method mocking.
  */
 export interface ITestDiscoveryService {
-  scanClassDeclarations(content: string): Array<{ name: string; parent: string; isAbstract: boolean }>;
+  scanClassDeclarations(content: string): ClassDeclaration[];
   resolveAllSpecBaseClasses(declarations: Array<{ name: string; parent: string }>): Set<string>;
   parseTestsInFile(content: string, knownSpecBaseClasses?: Set<string>): SpockTestClass[];
   hasAnnotation(annotations: SpockAnnotation[] | undefined, name: string): boolean;
@@ -14,49 +30,16 @@ export interface ITestDiscoveryService {
 }
 
 export class TestDiscoveryService implements ITestDiscoveryService {
-  private static readonly LIFECYCLE_METHODS = new Set(['setup', 'setupSpec', 'cleanup', 'cleanupSpec']);
-
-  // Broadened: matches any class that extends something (not just Specification)
-  private static readonly CLASS_REGEX = /^(?:abstract\s+)?class\s+(\w+)\s+extends\s+([\w.]+)/;
-
-  // Well-known Spock specification root classes
-  private static readonly KNOWN_SPEC_BASES = new Set([
-    'Specification', 'spock.lang.Specification'
-  ]);
-
-  // Known non-spec base classes that should never be treated as specs
-  private static readonly KNOWN_NON_SPEC_BASES = new Set([
-    'Object', 'java.lang.Object',
-    'GroovyTestCase', 'TestCase', 'junit.framework.TestCase',
-    'GroovyObjectSupport', 'Script', 'Binding'
-  ]);
-
-  private static readonly METHOD_HEADER_REGEX = /^(?:def|void)\s+(['"]([^'"]+)['"]|([a-zA-Z_]\w*))\s*(?:\([^)]*\))?\s*(\{)?\s*$/;
-  private static readonly BLOCK_LABEL_REGEX = /^(given|when|then|expect|where)\s*:\s*$/;
-
-  /**
-   * Regex that matches a Groovy/Java annotation.
-   * Captures: group 1 = annotation simple name, group 2 = optional argument text (without parens).
-   * Handles multi-line arguments by starting capture – caller must handle continuation lines.
-   */
-  private static readonly ANNOTATION_REGEX = /^@(\w+)(?:\((.*))?$/;
-
-  /** Annotations we recognise and surface in the test tree. */
-  private static readonly KNOWN_ANNOTATIONS = new Set([
-    'Ignore', 'PendingFeature', 'Stepwise', 'IgnoreIf', 'IgnoreRest',
-    'Requires', 'Timeout', 'Unroll', 'Issue', 'Title', 'Narrative', 'See'
-  ]);
-
   /**
    * Lightweight scan to extract class declarations (name + parent) without full method parsing.
    * Used for cross-file inheritance resolution.
    */
-  static scanClassDeclarations(content: string): Array<{ name: string; parent: string; isAbstract: boolean }> {
+  static scanClassDeclarations(content: string): ClassDeclaration[] {
     const lines = content.split('\n');
-    const result: Array<{ name: string; parent: string; isAbstract: boolean }> = [];
+    const result: ClassDeclaration[] = [];
     for (const line of lines) {
       const trimmed = line.trim();
-      const match = this.CLASS_REGEX.exec(trimmed);
+      const match = CLASS_REGEX.exec(trimmed);
       if (match?.[1] && match[2]) {
         result.push({
           name: match[1],
@@ -78,7 +61,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
   static resolveAllSpecBaseClasses(
     declarations: Array<{ name: string; parent: string }>
   ): Set<string> {
-    const specClasses = new Set(this.KNOWN_SPEC_BASES);
+    const specClasses = new Set(KNOWN_SPEC_BASES);
 
     let changed = true;
     while (changed) {
@@ -92,8 +75,8 @@ export class TestDiscoveryService implements ITestDiscoveryService {
           specClasses.add(name);
           changed = true;
         } else if (parent.includes('.')) {
-          const simpleName = parent.split('.').pop()!;
-          if (specClasses.has(simpleName)) {
+          const simpleName = parent.split('.').pop();
+          if (simpleName && specClasses.has(simpleName)) {
             specClasses.add(name);
             changed = true;
           }
@@ -126,13 +109,13 @@ export class TestDiscoveryService implements ITestDiscoveryService {
       const trimmedLine = line.trim();
 
       // Look for class definition (any class extending something)
-      if (this.CLASS_REGEX.test(trimmedLine)) {
-        const match = this.CLASS_REGEX.exec(trimmedLine);
+      if (CLASS_REGEX.test(trimmedLine)) {
+        const match = CLASS_REGEX.exec(trimmedLine);
         const className = match?.[1];
         const parentClassName = match?.[2];
         const isAbstract = trimmedLine.startsWith('abstract');
         if (className && parentClassName) {
-          const classAnnotations = this.collectAnnotationsAbove(lines, i);
+          const classAnnotations = collectAnnotationsAbove(lines, i);
           currentClass = {
             name: className,
             line: i,
@@ -145,7 +128,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
           allClasses.push(currentClass);
           inClass = true;
           ignoreRestActive = false; // Reset for new class
-          const delta = this.countBraceDelta(line);
+          const delta = countBraceDelta(line);
           if (delta > 0) {
             seenClassOpeningBrace = true;
           }
@@ -153,22 +136,22 @@ export class TestDiscoveryService implements ITestDiscoveryService {
         }
       }
       // Look for test methods
-      else if (inClass && currentClass && this.METHOD_HEADER_REGEX.test(trimmedLine)) {
-        const match = this.METHOD_HEADER_REGEX.exec(trimmedLine);
+      else if (inClass && currentClass && METHOD_HEADER_REGEX.test(trimmedLine)) {
+        const match = METHOD_HEADER_REGEX.exec(trimmedLine);
         const rawName = (match?.[2] || match?.[3] || '').trim();
         const hasBraceSameLine = !!match?.[4];
 
-        if (rawName && !this.LIFECYCLE_METHODS.has(rawName)) {
+        if (rawName && !LIFECYCLE_METHODS.has(rawName)) {
           const isQuoted = !!match?.[2];
-          const shouldAccept = isQuoted || this.lineHasSpockBlockLabelNearby(lines, i);
-          const braceOk = hasBraceSameLine || this.hasOpeningBraceOnOrNextLine(lines, i);
+          const shouldAccept = isQuoted || lineHasSpockBlockLabelNearby(lines, i);
+          const braceOk = hasBraceSameLine || hasOpeningBraceOnOrNextLine(lines, i);
 
           if (shouldAccept && braceOk) {
             // Check if this is a data-driven test by looking for 'where' block
-            const isDataDriven = this.hasWhereBlock(lines, i);
+            const isDataDriven = hasWhereBlock(lines, i);
 
             // Collect annotations above this method
-            let methodAnnotations = this.collectAnnotationsAbove(lines, i);
+            let methodAnnotations = collectAnnotationsAbove(lines, i);
 
             // If @IgnoreRest was seen on a previous method, synthesise @Ignore
             if (ignoreRestActive) {
@@ -188,7 +171,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
               line: i,
               range: new vscode.Range(i, 0, i, line.length),
               isDataDriven: isDataDriven,
-              whereBlock: isDataDriven ? this.parseWhereBlock(lines, i) : undefined,
+              whereBlock: isDataDriven ? parseWhereBlock(lines, i) : undefined,
               annotations: methodAnnotations.length > 0 ? methodAnnotations : undefined
             };
             currentClass.methods.push(testMethod);
@@ -198,7 +181,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
 
       // Update class brace balance
       if (inClass) {
-        const delta = this.countBraceDelta(line);
+        const delta = countBraceDelta(line);
         if (delta > 0) {
           seenClassOpeningBrace = true;
         }
@@ -251,7 +234,7 @@ export class TestDiscoveryService implements ITestDiscoveryService {
     knownSpecBaseClasses?: Set<string>
   ): SpockTestClass[] {
     // Build the combined set of known spec base class names
-    const specNames = new Set(this.KNOWN_SPEC_BASES);
+    const specNames = new Set(KNOWN_SPEC_BASES);
     if (knownSpecBaseClasses) {
       for (const name of knownSpecBaseClasses) {
         specNames.add(name);
@@ -303,320 +286,28 @@ export class TestDiscoveryService implements ITestDiscoveryService {
     if (specNames.has(cls.name)) {
       return true;
     }
-    if (!cls.parentClassName || this.KNOWN_NON_SPEC_BASES.has(cls.parentClassName)) {
+    if (!cls.parentClassName || KNOWN_NON_SPEC_BASES.has(cls.parentClassName)) {
       return false;
     }
     return cls.methods.length > 0;
   }
-
-  // ── Annotation helpers ─────────────────────────────────────────────
-
-  /**
-   * Walk backwards from `lineIndex` and collect all annotations directly above.
-   * Stops at the first non-annotation, non-blank, non-comment line.
-   * Handles multi-line annotation arguments (parenthesised across lines).
-   */
-  private static collectAnnotationsAbove(lines: string[], lineIndex: number): SpockAnnotation[] { // NOSONAR
-    const annotations: SpockAnnotation[] = [];
-    let j = lineIndex - 1;
-    while (j >= 0) {
-      const trimmed = lines[j].trim();
-
-      // Skip blank lines and single-line comments
-      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*') || trimmed.startsWith('*/')) {
-        j--;
-        continue;
-      }
-
-      const annoMatch = this.ANNOTATION_REGEX.exec(trimmed);
-      if (annoMatch) {
-        const name = annoMatch[1];
-        let argument: string | undefined;
-
-        if (annoMatch[2] !== undefined) {
-          // Annotation has parenthesised argument(s)
-          let argText = annoMatch[2];
-          // Check if the closing paren is on the same line
-          if (!this.isParensClosed(argText)) {
-            // Gather continuation lines until we close the parentheses
-            let k = j + 1;
-            while (k < lineIndex && !this.isParensClosed(argText)) {
-              argText += ' ' + lines[k].trim();
-              k++;
-            }
-          }
-          // Strip trailing ')' and whitespace
-          argument = argText.replace(/\)\s*$/, '').trim() || undefined;
-        }
-
-        annotations.push({ name, argument, line: j });
-        j--;
-      } else {
-        // Not an annotation line – stop scanning
-        break;
-      }
-    }
-    return annotations;
-  }
-
-  /** Quick check: does the accumulated text have balanced / closed parentheses? */
-  private static isParensClosed(text: string): boolean {
-    let depth = 0;
-    for (const ch of text) {
-      if (ch === '(') { depth++; }
-      if (ch === ')') { depth--; }
-      if (depth < 0) { return true; } // closing paren found for the opening from the annotation line
-    }
-    return depth <= 0;
-  }
-
-  /**
-   * Convenience: check whether a list of annotations contains a specific one.
-   */
   static hasAnnotation(annotations: SpockAnnotation[] | undefined, name: string): boolean {
-    return annotations?.some(a => a.name === name) ?? false;
+    return hasAnnotation(annotations, name);
   }
 
   /**
    * Get the argument value for a specific annotation. Returns undefined if not found.
    */
   static getAnnotationArgument(annotations: SpockAnnotation[] | undefined, name: string): string | undefined {
-    return annotations?.find(a => a.name === name)?.argument;
+    return getAnnotationArgument(annotations, name);
   }
-
-  // ── Structural helpers ─────────────────────────────────────────────
-
-  private static hasOpeningBraceOnOrNextLine(lines: string[], startIndex: number): boolean {
-    for (let j = startIndex + 1; j < Math.min(lines.length, startIndex + 5); j++) {
-      const t = lines[j].trim();
-      if (!t) {
-        continue;
-      }
-      if (t.startsWith('//')) {
-        continue;
-      }
-      return t.startsWith('{');
-    }
-    return false;
-  }
-
-  private static lineHasSpockBlockLabelNearby(lines: string[], startIndex: number): boolean {
-    for (let j = startIndex + 1; j < Math.min(lines.length, startIndex + 50); j++) {
-      const t = lines[j].trim();
-      if (!t) {
-        continue;
-      }
-      if (this.BLOCK_LABEL_REGEX.test(t)) {
-        return true;
-      }
-      if (t === '}') {
-        return false;
-      }
-    }
-    return false;
-  }
-
-  private static countBraceDelta(text: string): number {
-    const open = (text.match(/\{/g) || []).length;
-    const close = (text.match(/\}/g) || []).length;
-    return open - close;
-  }
-
-  private static hasWhereBlock(lines: string[], startIndex: number): boolean {
-    let braceBalance = 0;
-    let foundOpeningBrace = false;
-    
-    for (let j = startIndex; j < lines.length; j++) {
-      const line = lines[j];
-      const trimmedLine = line.trim();
-      
-      // Count braces to track method boundaries
-      const delta = this.countBraceDelta(line);
-      braceBalance += delta;
-      
-      if (delta > 0) {
-        foundOpeningBrace = true;
-      }
-      
-      // If we've found the opening brace and now we're back to 0, we've reached the end of the method
-      if (foundOpeningBrace && braceBalance <= 0) {
-        break;
-      }
-      
-      // Look for 'where:' block
-      if (this.BLOCK_LABEL_REGEX.test(trimmedLine) && trimmedLine.includes('where')) {
-        return true;
-      }
-    }
-    
-    return false;
-  }
-
-  /**
-   * Statically parse a where-block to extract parameter names and data rows.
-   * Returns undefined if the where-block can't be parsed (dynamic expressions, etc.).
-   */
   static parseWhereBlock(lines: string[], methodStartIndex: number): WhereBlockData | undefined {
-    const { whereLineIndex, methodEndIndex } = this.findWhereBlockBounds(lines, methodStartIndex);
-    if (whereLineIndex < 0) {
-      return undefined;
-    }
-
-    const contentLines = this.collectWhereContentLines(lines, whereLineIndex + 1, methodEndIndex);
-    if (contentLines.length === 0) {
-      return undefined;
-    }
-
-    // Try data-table format first: header row with | separators, then data rows
-    if (contentLines[0].includes('|') && !contentLines[0].includes('<<')) {
-      return this.parseDataTable(contentLines);
-    }
-
-    // Try data-pipe format: var << [values]
-    if (contentLines[0].includes('<<')) {
-      return this.parseDataPipes(contentLines);
-    }
-
-    return undefined;
-  }
-
-  private static findWhereBlockBounds(lines: string[], methodStartIndex: number): { whereLineIndex: number; methodEndIndex: number } {
-    let braceBalance = 0;
-    let foundOpeningBrace = false;
-    let whereLineIndex = -1;
-    let methodEndIndex = lines.length;
-
-    for (let j = methodStartIndex; j < lines.length; j++) {
-      const line = lines[j];
-      const trimmedLine = line.trim();
-      const delta = this.countBraceDelta(line);
-      braceBalance += delta;
-      if (delta > 0) { foundOpeningBrace = true; }
-      if (foundOpeningBrace && braceBalance <= 0) {
-        methodEndIndex = j;
-        break;
-      }
-      if (this.BLOCK_LABEL_REGEX.test(trimmedLine) && trimmedLine.includes('where')) {
-        whereLineIndex = j;
-      }
-    }
-
-    return { whereLineIndex, methodEndIndex };
-  }
-
-  private static collectWhereContentLines(lines: string[], startIndex: number, endIndex: number): string[] {
-    const contentLines: string[] = [];
-    for (let j = startIndex; j < endIndex; j++) {
-      const trimmed = lines[j].trim();
-      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed === '*/') {
-        continue;
-      }
-      if (this.BLOCK_LABEL_REGEX.test(trimmed)) {
-        break;
-      }
-      contentLines.push(trimmed);
-    }
-    return contentLines;
-  }
-
-  /**
-   * Parse a data-table style where-block:
-   *   a | b | c
-   *   1 | 2 | 3
-   *   4 | 5 | 9
-   */
-  private static parseDataTable(lines: string[]): WhereBlockData | undefined {
-    if (lines.length < 2) {
-      return undefined;
-    }
-
-    const splitRow = (line: string): string[] =>
-      line.split('|').map(cell => cell.trim()).filter(cell => cell.length > 0);
-
-    // First non-separator row is the header
-    const headerLine = lines[0].replaceAll(/^\|+|\|+$/g, '');  // strip leading/trailing pipes
-    const parameterNames = splitRow(headerLine);
-    if (parameterNames.length === 0) {
-      return undefined;
-    }
-
-    // Validate that header cells look like identifiers (not expressions)
-    if (parameterNames.some(name => !/^[a-zA-Z_]\w*$/.test(name))) {
-      return undefined;
-    }
-
-    const dataRows: string[][] = [];
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i];
-      // Skip separator lines (e.g. "---" or "||")
-      if (/^[-|_]+$/.test(line.replaceAll(/\s/g, ''))) {
-        continue;
-      }
-      const stripped = line.replaceAll(/^\|+|\|+$/g, '');
-      const cells = splitRow(stripped);
-      if (cells.length === parameterNames.length) {
-        dataRows.push(cells);
-      }
-    }
-
-    if (dataRows.length === 0) {
-      return undefined;
-    }
-
-    return {
-      parameterNames,
-      iterationCount: dataRows.length,
-      dataRows,
-    };
-  }
-
-  /**
-   * Parse a data-pipe style where-block:
-   *   a << [1, 4]
-   *   b << [2, 5]
-   *   c << [3, 9]
-   */
-  private static parseDataPipes(lines: string[]): WhereBlockData | undefined {
-    const pipes: Array<{ name: string; values: string[] }> = [];
-
-    for (const line of lines) {
-      const match = /^(\w+)\s*<<\s*\[(.*)\]\s*$/.exec(line);
-      if (!match) {
-        // If any pipe line can't be parsed (expressions, multi-line), bail out
-        return undefined;
-      }
-      const name = match[1];
-      const valuesStr = match[2];
-      const values = valuesStr.split(',').map(v => v.trim());
-      pipes.push({ name, values });
-    }
-
-    if (pipes.length === 0) {
-      return undefined;
-    }
-
-    // All pipes must have the same number of values
-    const iterationCount = pipes[0].values.length;
-    if (iterationCount === 0 || pipes.some(p => p.values.length !== iterationCount)) {
-      return undefined;
-    }
-
-    const parameterNames = pipes.map(p => p.name);
-    const dataRows: string[][] = [];
-    for (let i = 0; i < iterationCount; i++) {
-      dataRows.push(pipes.map(p => p.values[i]));
-    }
-
-    return {
-      parameterNames,
-      iterationCount,
-      dataRows,
-    };
+    return parseWhereBlock(lines, methodStartIndex);
   }
 
   // ── Instance methods (delegate to static — for DI / mocking) ───────
 
-  scanClassDeclarations(content: string): Array<{ name: string; parent: string; isAbstract: boolean }> {
+  scanClassDeclarations(content: string): ClassDeclaration[] {
     return TestDiscoveryService.scanClassDeclarations(content);
   }
   resolveAllSpecBaseClasses(declarations: Array<{ name: string; parent: string }>): Set<string> {

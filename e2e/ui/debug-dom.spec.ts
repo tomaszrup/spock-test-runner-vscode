@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures/vscode.fixture';
+import { test } from './fixtures/vscode.fixture';
 import { TestExplorer } from './helpers/test-explorer';
 
 test('debug DOM structure', async ({ vscodePage }) => {

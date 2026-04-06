@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "ES2021",
+    "lib": ["ES2021", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node", "playwright", "@playwright/test"]
+  },
+  "include": [
+    "./**/*.ts"
+  ],
+  "exclude": [
+    "../node_modules"
+  ]
+}

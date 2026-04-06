@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { EventEmitter } from 'events';
+import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { TestExecutionService } from './TestExecutionService';
 import { createMockLogger } from '../__test_helpers__';
@@ -94,7 +94,7 @@ describe('TestExecutionService', () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     fakeProc = createFakeChildProcess();
-    mockedSpawn.mockReturnValue(fakeProc as any);
+    mockedSpawn.mockReturnValue(fakeProc);
     logger = createMockLogger();
     run = createMockRun();
     service = new TestExecutionService(logger);
@@ -206,7 +206,10 @@ describe('TestExecutionService', () => {
         token,
       });
       token.isCancellationRequested = true;
-      cancelCb!();
+      if (!cancelCb) {
+        throw new Error('Expected cancellation callback to be registered');
+      }
+      cancelCb();
       fakeProc.emit('close', null);
       const result = await promise;
       expect(result.success).toBe(false);

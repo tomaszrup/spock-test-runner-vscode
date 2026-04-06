@@ -45,8 +45,7 @@ export function collectTestItems(
 ): vscode.TestItem[] {
   const items: vscode.TestItem[] = [];
   collection.forEach((item) => {
-    items.push(item);
-    items.push(...collectTestItems(item.children));
+    items.push(item, ...collectTestItems(item.children));
   });
   return items;
 }

@@ -21,10 +21,6 @@ public class BowlingGame {
             }
             frames.add(frame);
         }
-
-        var x = new ArrayList<String>();
-        x.add(null);
-        var c = List.copyOf(x);
     }
     
     public void roll(int pins) {

@@ -61,8 +61,11 @@ export class Range {
   constructor(start: Position, end: Position);
   constructor(a: number | Position, b: number | Position, c?: number, d?: number) {
     if (typeof a === 'number' && typeof b === 'number') {
+      if (typeof c !== 'number' || typeof d !== 'number') {
+        throw new TypeError('Range end position must be provided for numeric construction');
+      }
       this.start = new Position(a, b);
-      this.end = new Position(c!, d!);
+      this.end = new Position(c, d);
     } else {
       this.start = a as Position;
       this.end = b as Position;
@@ -225,7 +228,9 @@ export class EventEmitter<T> {
 export class CancellationTokenSource {
   token = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => {} }) };
   cancel(): void { this.token.isCancellationRequested = true; }
-  dispose(): void {}
+  dispose(): void {
+    this.cancel();
+  }
 }
 
 // --- Relative pattern ----------------------------------------------------
@@ -250,7 +255,7 @@ export const workspace = {
   getConfiguration: (section?: string) => ({
     get: <T>(key: string, defaultValue?: T): T => {
       const fullKey = section ? `${section}.${key}` : key;
-      return fullKey in _configValues ? _configValues[fullKey] : (defaultValue as T);
+      return fullKey in _configValues ? _configValues[fullKey] : defaultValue;
     },
     update: async () => {},
     has: () => true,
@@ -433,11 +438,11 @@ export class MarkdownString {
   constructor(value?: string) {
     this.value = value ?? '';
   }
-  appendMarkdown(value: string): MarkdownString {
+  appendMarkdown(value: string): this {
     this.value += value;
     return this;
   }
-  appendText(value: string): MarkdownString {
+  appendText(value: string): this {
     this.value += value;
     return this;
   }

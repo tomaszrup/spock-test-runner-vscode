@@ -1,6 +1,6 @@
 import * as assert from 'node:assert';
 import * as vscode from 'vscode';
-import { getActivatedExtension, waitFor } from '../helpers/wait-helpers';
+import { getActivatedExtension } from '../helpers/wait-helpers';
 
 /**
  * Test discovery for the Maven sample project.

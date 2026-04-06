@@ -1171,7 +1171,10 @@ describe('TestTreeManager', () => {
         expect.stringContaining('already in progress'),
       );
 
-      resolveFirst!();
+      if (!resolveFirst) {
+        throw new Error('Expected the first discovery call to remain pending');
+      }
+      resolveFirst();
       await first;
       await second;
     });

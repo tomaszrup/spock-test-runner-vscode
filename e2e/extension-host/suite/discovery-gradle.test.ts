@@ -3,9 +3,6 @@ import * as vscode from 'vscode';
 import {
   getActivatedExtension,
   waitFor,
-  collectTestItems,
-  findTestItemByLabel,
-  findTestItemsByPattern,
 } from '../helpers/wait-helpers';
 
 /**
@@ -22,11 +19,7 @@ suite('Test Discovery — Gradle', function () {
     await getActivatedExtension();
     // Give discovery time to complete
     await waitFor(
-      () => {
-        const controllers = (vscode as any).tests?.controllers;
-        // Fallback: just wait for the extension to settle
-        return true;
-      },
+      () => true,
       10_000,
     );
   });

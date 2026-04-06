@@ -12,11 +12,10 @@ suite('Configuration', function () {
 
   test('default testSourcePatterns is set', () => {
     const config = vscode.workspace.getConfiguration('spockTestRunner');
-    const patterns = config.get<string[]>('testSourcePatterns');
-    assert.ok(patterns, 'testSourcePatterns should be defined');
-    assert.ok(patterns!.length > 0, 'testSourcePatterns should have at least one entry');
+    const patterns = config.get<string[]>('testSourcePatterns') ?? [];
+    assert.ok(patterns.length > 0, 'testSourcePatterns should have at least one entry');
     assert.ok(
-      patterns!.includes('**/src/test/groovy/**/*.groovy'),
+      patterns.includes('**/src/test/groovy/**/*.groovy'),
       'Default pattern should include **/src/test/groovy/**/*.groovy',
     );
   });
@@ -41,16 +40,16 @@ suite('Configuration', function () {
 
   test('additionalGradleArgs defaults to empty array', () => {
     const config = vscode.workspace.getConfiguration('spockTestRunner');
-    const args = config.get<string[]>('additionalGradleArgs');
+    const args = config.get<string[]>('additionalGradleArgs') ?? [];
     assert.ok(Array.isArray(args), 'additionalGradleArgs should be an array');
-    assert.strictEqual(args!.length, 0, 'additionalGradleArgs should default to empty');
+    assert.strictEqual(args.length, 0, 'additionalGradleArgs should default to empty');
   });
 
   test('additionalMavenArgs defaults to empty array', () => {
     const config = vscode.workspace.getConfiguration('spockTestRunner');
-    const args = config.get<string[]>('additionalMavenArgs');
+    const args = config.get<string[]>('additionalMavenArgs') ?? [];
     assert.ok(Array.isArray(args), 'additionalMavenArgs should be an array');
-    assert.strictEqual(args!.length, 0, 'additionalMavenArgs should default to empty');
+    assert.strictEqual(args.length, 0, 'additionalMavenArgs should default to empty');
   });
 
   test('changing testSourcePatterns triggers rediscovery', async function () {
